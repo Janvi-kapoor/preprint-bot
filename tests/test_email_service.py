@@ -8,10 +8,17 @@ MODULE = "services.email_service"
 @pytest.fixture
 def email_service(monkeypatch):
     """Fixture to reload email_service with fresh config mocking safely."""
-    # Mock config module
+    # Mock config module with all required attributes imported by email_service
     config_mock = types.ModuleType("config")
+    config_mock.EMAIL_HOST = "smtp.test.com"
+    config_mock.EMAIL_PORT = 587
+    config_mock.EMAIL_USER = "user"
+    config_mock.EMAIL_PASSWORD = "password"
+    config_mock.EMAIL_FROM_ADDRESS = "from@test.com"
+    config_mock.EMAIL_FROM_NAME = "Test"
     config_mock.SITE_URL = "https://example.com"
     config_mock.ADMIN_EMAIL = "admin@example.com"
+    
     monkeypatch.setitem(sys.modules, "config", config_mock)
     
     cached = sys.modules.pop(MODULE, None)
