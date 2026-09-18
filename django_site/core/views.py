@@ -1766,54 +1766,7 @@ def monitoring_dashboard_view(request):
     }
     return render(request, "monitoring.html", context)
 
-
-def recommendation_create_profile_view(request, paper_id):
-    """Create a new profile with a recommended paper (AJAX)."""
-    pb_user = request.pb_user
-    paper = get_object_or_404(Paper, pk=paper_id)
-
-    # Verify the paper was actually recommended to this user
-    was_recommended = Recommendation.objects.filter(
-        paper=paper, run__user=pb_user
-    ).exists()
-    if not was_recommended:
-        return JsonResponse({"ok": False, "error": "Paper not found."}, status=404)
-
-    if request.method == "POST":
-        name = request.POST.get("name", "").strip()
-        if not name:
-            return JsonResponse({"ok": False, "error": "Profile name is required."}, status=400)
-
-        if Profile.objects.filter(user=pb_user, name__iexact=name).exists():
-            return JsonResponse({"ok": False, "error": f"A profile named '{name}' already exists."}, status=400)
-
-        # Create new profile with default settings
-        profile = Profile.objects.create(
-            user=pb_user,
-            name=name,
-            categories=[],
-            frequency="daily",
-            threshold=0.6,
-            top_x=999,
-        )
-
-        corpus = _get_or_create_user_corpus(pb_user, profile)
-        _link_paper_to_corpus(paper, corpus)
-
-        return JsonResponse({
-            "ok": True,
-            "profile": {
-                "id": profile.pk,
-                "name": profile.name,
-            },
-            "paper": {
-                "id": paper.pk,
-                "title": paper.title,
-                "arxiv_id": paper.arxiv_id,
-            },
-        })
-
-    return JsonResponse({"ok": False, "error": "Invalid request method."}, status=405)
+from django.db import transaction, IntegrityError
 
 @pbuser_required
 @require_POST
@@ -1821,23 +1774,35 @@ def recommendation_create_profile_view(request, paper_id):
     """Create a new profile with a recommended paper (AJAX)."""
     pb_user = request.pb_user
     paper = get_object_or_404(Paper, pk=paper_id)
-
+    
     was_recommended = Recommendation.objects.filter(
         paper=paper, run__user=pb_user
     ).exists()
     if not was_recommended:
         return JsonResponse({"ok": False, "error": "Paper not found."}, status=404)
-
+        
     name = request.POST.get("name", "").strip()
     if not name:
         return JsonResponse({"ok": False, "error": "Profile name is required."}, status=400)
-
+        
     if Profile.objects.filter(user=pb_user, name__iexact=name).exists():
         return JsonResponse({"ok": False, "error": f"A profile named '{name}' already exists."}, status=400)
-
-    categories = []
+        
+    # Extract categories from paper metadata
+    raw_categories = []
     if paper.metadata and isinstance(paper.metadata, dict) and "categories" in paper.metadata:
-        categories = paper.metadata["categories"]
+        raw_categories = paper.metadata["categories"]
+        
+    # Validate categories using ProfileForm.clean_categories if applicable, or fallback safely
+    form = ProfileForm(data={"name": name, "categories": ",".join(raw_categories) if isinstance(raw_categories, list) else raw_categories})
+    # If form has clean_categories validation
+    categories = raw_categories
+    if hasattr(form, "clean_categories") and raw_categories:
+        try:
+            form.cleaned_data = {"categories": raw_categories}
+            categories = form.clean_categories() or raw_categories
+        except Exception:
+            categories = raw_categories
 
     try:
         with transaction.atomic():
@@ -1848,9 +1813,11 @@ def recommendation_create_profile_view(request, paper_id):
             )
             corpus = _get_or_create_user_corpus(pb_user, profile)
             _link_paper_to_corpus(paper, corpus)
+    except IntegrityError:
+        return JsonResponse({"ok": False, "error": "A profile with that name already exists."}, status=400)
     except Exception as e:
         return JsonResponse({"ok": False, "error": str(e)}, status=400)
-
+        
     return JsonResponse({
         "ok": True,
         "profile": {
@@ -1860,6 +1827,6 @@ def recommendation_create_profile_view(request, paper_id):
         "paper": {
             "id": paper.pk,
             "title": paper.title,
-            "arxiv_id": paper.arxiv_id,
+            "source_id": paper.source_id,
         },
     })
