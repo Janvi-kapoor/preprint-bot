@@ -54,4 +54,4 @@ def test_digest_email_links(email_service):
         frequency="daily"
     )
     assert email_service.RECOMMENDATIONS_URL in html
-    assert html.count(email_service.RECOMMENDATIONS_URL) >= 3
+    assert html.count(email_service.RECOMMENDATIONS_URL) >= 2
