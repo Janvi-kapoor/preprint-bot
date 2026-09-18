@@ -892,9 +892,9 @@ pip install black isort
 black src/ tests/
 isort src/ tests/
 
-# Lint
+# Lint (settings come from .flake8)
 pip install flake8
-flake8 src/ tests/ --max-line-length=120
+flake8 .
 
 # Type checking
 pip install mypy
