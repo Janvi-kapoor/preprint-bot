@@ -31,6 +31,8 @@ def extract_grobid_sections(src):
         raise
     
     root = etree.fromstring(resp.content)
+    if root is None or not root.tag.endswith('TEI'):
+        raise ValueError(f'Unexpected GROBID XML root element: {root.tag if root is not None else "None"}')
 
     # 3. Convenience helper
     def _txt(el, path):
