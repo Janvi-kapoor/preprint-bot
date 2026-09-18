@@ -8,7 +8,6 @@ MODULE = "services.email_service"
 @pytest.fixture
 def email_service(monkeypatch):
     """Fixture to reload email_service with fresh config mocking safely."""
-    # Mock config module with all required attributes imported by email_service
     config_mock = types.ModuleType("config")
     config_mock.EMAIL_HOST = "smtp.test.com"
     config_mock.EMAIL_PORT = 587
@@ -43,13 +42,16 @@ def test_digest_email_links(email_service):
             "source_id": "2301.00001",
             "title": "Test Paper Title",
             "authors": "Author One",
-            "summary": "This is a test summary.",
+            "summary_text": "This is a test summary.",
         }
     ]
-    html = email_service.render_digest_email(
+    html = email_service.build_digest_html(
         profile_name="Test Profile",
         papers=papers,
-        unsubscribe_token="token123"
+        run_date="2026-09-04",
+        shown=1,
+        total=1,
+        frequency="daily"
     )
     assert email_service.RECOMMENDATIONS_URL in html
     assert html.count(email_service.RECOMMENDATIONS_URL) >= 3
