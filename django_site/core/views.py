@@ -18,6 +18,7 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.db.models import Avg, Count, Max, Q
 from django.db.models.functions import TruncDate
 from django.http import FileResponse, Http404, JsonResponse
+from django.db import transaction, IntegrityError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -1766,7 +1767,6 @@ def monitoring_dashboard_view(request):
     }
     return render(request, "monitoring.html", context)
 
-from django.db import transaction, IntegrityError
 
 @pbuser_required
 @require_POST
