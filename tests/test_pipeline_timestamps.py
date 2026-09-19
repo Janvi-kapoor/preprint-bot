@@ -18,3 +18,7 @@ class TestPipelineDurationFormatting:
     )
     def test_format_duration(self, seconds, expected):
         assert _format_duration(seconds) == expected
+
+    def test_format_duration_hours(self):
+        assert _format_duration(3661.0) == "1h 1m 1.0s"
+

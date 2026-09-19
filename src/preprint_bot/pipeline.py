@@ -67,8 +67,11 @@ def _format_duration(seconds: float) -> str:
     """Format duration into human-readable string."""
     if seconds < 60:
         return f"{seconds:.2f}s"
-    mins = int(seconds // 60)
+    hours = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
     secs = seconds % 60
+    if hours > 0:
+        return f"{hours}h {mins}m {secs:.1f}s"
     return f"{mins}m {secs:.1f}s"
 
 
@@ -183,6 +186,7 @@ async def _parse_and_store_sections(
     Unlike the old process_folder → _output.txt → store_sections flow,
     this goes straight from GROBID's structured output to the database.
     """
+    parse_start = time.time()
     papers = await api_client.get_papers_by_corpus(corpus_id)
     entry_ids = {e.source_id for e in entries}
     papers = [p for p in papers if p.get('arxiv_id') in entry_ids]
