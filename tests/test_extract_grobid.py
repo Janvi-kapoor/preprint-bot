@@ -174,7 +174,6 @@ class TestGrobidParsing:
         assert result["sections"] == []
 
 
-
 class TestGrobidOutputRobustness:
     """Robustness tests to ensure the parser detects structural changes and namespace drift in GROBID XML output."""
 
