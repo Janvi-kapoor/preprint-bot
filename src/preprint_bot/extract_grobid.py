@@ -31,13 +31,9 @@ def extract_grobid_sections(src):
         raise
 
     root = etree.fromstring(resp.content)
-    EXPECTED_NS = "http://www.tei-c.org/ns/1.0"
-    is_tei_tag = root is not None and (root.tag.endswith("}TEI") or root.tag == "TEI")
-    has_correct_ns = root is not None and root.tag.startswith(f"{{{EXPECTED_NS}}}")
-    
-    if root is None or not is_tei_tag or not has_correct_ns:
+    if root.tag != f"{{{NS['tei']}}}TEI":
         raise ValueError(
-            f"Unexpected GROBID XML root element or unrecognized namespace: {root.tag if root is not None else 'None'}"
+            f"Unexpected GROBID XML root element or unrecognized namespace: {root.tag}"
         )
 
     # 3. Convenience helper
