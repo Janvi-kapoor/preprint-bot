@@ -2,6 +2,7 @@
 
 import json
 from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 from django.test import TestCase
 
@@ -17,7 +18,15 @@ from core.models import (
 from core.views import _get_or_create_user_corpus, _query_profile_recommendations
 
 
-def _make_paper(source_id, title, submitted_date=None, categories=None, authors=None, abstract=""):
+def _make_paper(
+    source_id,
+    title,
+    submitted_date=None,
+    categories=None,
+    authors=None,
+    abstract="",
+    source="arxiv",
+):
     """Create a Paper (sha256 left null; metadata drives categories/authors)."""
     return Paper.objects.create(
         source_id=source_id,
@@ -25,7 +34,7 @@ def _make_paper(source_id, title, submitted_date=None, categories=None, authors=
         abstract=abstract,
         submitted_date=submitted_date,
         metadata={"categories": categories or [], "authors": authors or []},
-        source="arxiv",
+        source=source,
     )
 
 
@@ -62,23 +71,33 @@ class QueryProfileRecommendationsTests(_RecTestBase):
     """_query_profile_recommendations: scoping, dedup, serialization, empties."""
 
     def test_single_profile_returns_only_that_profiles_recs(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
-        pb = Profile.objects.create(user=self.user, name="B", categories=["cs.LG"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
+        pb = Profile.objects.create(
+            user=self.user, name="B", source_categories={"arxiv": ["cs.LG"]}
+        )
         self._rec(self._run_for(pa), _make_paper("2301.00001", "Paper A"), 0.8)
         self._rec(self._run_for(pb), _make_paper("2301.00002", "Paper B"), 0.7)
         aids = {r["source_id"] for r in _query_profile_recommendations(self.user, pa)}
         self.assertEqual(aids, {"2301.00001"})
 
     def test_all_profiles_aggregates_across_corpora(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
-        pb = Profile.objects.create(user=self.user, name="B", categories=["cs.LG"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
+        pb = Profile.objects.create(
+            user=self.user, name="B", source_categories={"arxiv": ["cs.LG"]}
+        )
         self._rec(self._run_for(pa), _make_paper("2301.00001", "Paper A"), 0.8)
         self._rec(self._run_for(pb), _make_paper("2301.00002", "Paper B"), 0.7)
         aids = {r["source_id"] for r in _query_profile_recommendations(self.user, None)}
         self.assertEqual(aids, {"2301.00001", "2301.00002"})
 
     def test_dedup_keeps_highest_score_across_runs(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         d = datetime(2023, 6, 15, tzinfo=timezone.utc)
         # Two Paper rows sharing an source_id, recommended in two different runs.
         self._rec(self._run_for(pa), _make_paper("2301.00001", "Low", submitted_date=d), 0.5)
@@ -88,15 +107,46 @@ class QueryProfileRecommendationsTests(_RecTestBase):
         self.assertAlmostEqual(results[0]["score"], 0.9)
         self.assertEqual(results[0]["title"], "High")
 
+    def test_dedup_is_per_source_not_per_id(self):
+        """The same id on two servers must yield two recommendations.
+
+        Ids are only unique within a source, so keying dedup on the id alone
+        would let the higher-scoring paper hide the other entirely. Paper.source
+        is not DB-constrained to the registry, so "biorxiv" stands in here for
+        any second server the deployment might enable.
+        """
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
+        d = datetime(2023, 6, 15, tzinfo=timezone.utc)
+        run = self._run_for(pa)
+        self._rec(run, _make_paper("2301.00001", "From arXiv", submitted_date=d), 0.9, rank=1)
+        self._rec(
+            run,
+            _make_paper("2301.00001", "From elsewhere", submitted_date=d, source="biorxiv"),
+            0.5,
+            rank=2,
+        )
+        results = _query_profile_recommendations(self.user, pa)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            {(r["source"], r["title"]) for r in results},
+            {("arxiv", "From arXiv"), ("biorxiv", "From elsewhere")},
+        )
+
     def test_paper_without_date_gets_unknown(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         self._rec(self._run_for(pa), _make_paper("2301.00001", "No Date", submitted_date=None), 0.5)
         r = _query_profile_recommendations(self.user, pa)[0]
         self.assertIsNone(r["date_obj"])
         self.assertEqual(r["date_str"], "Unknown Date")
 
     def test_paper_with_date_is_formatted(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         dated = _make_paper(
             "2301.00001", "Dated", submitted_date=datetime(2023, 6, 15, tzinfo=timezone.utc)
         )
@@ -106,7 +156,9 @@ class QueryProfileRecommendationsTests(_RecTestBase):
         self.assertEqual(r["date_str"], "15 June 2023")
 
     def test_summary_only_from_abstract_mode(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         run = self._run_for(pa)
         p1 = _make_paper("2301.00001", "Has Summary")
         p2 = _make_paper("2301.00002", "No Abstract Summary")
@@ -120,30 +172,42 @@ class QueryProfileRecommendationsTests(_RecTestBase):
         self.assertEqual(by_aid["2301.00002"]["summary_text"], "")
 
     def test_profile_with_no_corpus_returns_empty(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         self.assertEqual(_query_profile_recommendations(self.user, pa), [])
 
     def test_corpus_with_no_runs_returns_empty(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         _get_or_create_user_corpus(self.user, pa)  # corpus exists, no runs
         self.assertEqual(_query_profile_recommendations(self.user, pa), [])
 
     def test_run_with_no_recommendations_returns_empty(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         self._run_for(pa)  # run exists, no recs
         self.assertEqual(_query_profile_recommendations(self.user, pa), [])
 
     def test_all_profiles_no_corpora_returns_empty(self):
-        Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])  # no corpus
+        Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )  # no corpus
         self.assertEqual(_query_profile_recommendations(self.user, None), [])
 
     def test_user_isolation(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         self._rec(self._run_for(pa), _make_paper("2301.00001", "Mine"), 0.8)
         # Another user with their own profile/run/recommendation.
         other = PBUser.objects.create_user(email="other@example.com", password="SecurePass123!")
         other_ref = Corpus.objects.create(user=other, name="ref_arxiv")
-        other_p = Profile.objects.create(user=other, name="OB", categories=["cs.LG"])
+        other_p = Profile.objects.create(
+            user=other, name="OB", source_categories={"arxiv": ["cs.LG"]}
+        )
         other_run = RecommendationRun.objects.create(
             user=other,
             user_corpus=_get_or_create_user_corpus(other, other_p),
@@ -163,7 +227,7 @@ class QueryProfileRecommendationsTests(_RecTestBase):
 
 
 class RecommendationsViewTests(_RecTestBase):
-    """recommendations_view: recs_json / categories_json, empty states."""
+    """recommendations_view: recs_json / filter_sources_json, empty states."""
 
     def setUp(self):
         super().setUp()
@@ -179,10 +243,13 @@ class RecommendationsViewTests(_RecTestBase):
         resp = self.client.get("/recommendations/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(json.loads(resp.context["recs_json"]), [])
-        self.assertEqual(json.loads(resp.context["categories_json"]), [])
+        # The no-profiles branch never renders the filter script block.
+        self.assertNotIn("filter_sources_json", resp.context)
 
     def test_recs_json_has_expected_fields(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         paper = _make_paper(
             "2301.00001",
             "A Paper",
@@ -217,29 +284,72 @@ class RecommendationsViewTests(_RecTestBase):
         self.assertNotIn("date_obj", r)  # stripped during serialization
 
     def test_recs_json_null_date_serialization(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
         self._rec(self._run_for(pa), _make_paper("2301.00001", "No Date", submitted_date=None), 0.5)
         r = json.loads(self.client.get("/recommendations/").context["recs_json"])[0]
         self.assertIsNone(r["date_iso"])
         self.assertEqual(r["date_str"], "Unknown Date")
 
-    def test_categories_json_unions_all_profiles(self):
-        Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
-        Profile.objects.create(user=self.user, name="B", categories=["cs.LG", "math.CO"])
-        cats = json.loads(self.client.get("/recommendations/").context["categories_json"])
-        self.assertEqual(cats, ["cs.AI", "cs.LG", "math.CO"])
+    def _filter_sources(self, url="/recommendations/"):
+        return json.loads(self.client.get(url).context["filter_sources_json"])
 
-    def test_categories_json_scoped_to_selected_profile(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
-        Profile.objects.create(user=self.user, name="B", categories=["cs.LG", "math.CO"])
-        cats = json.loads(
-            self.client.get(f"/recommendations/?profile={pa.pk}").context["categories_json"]
+    def test_filter_sources_union_all_profiles(self):
+        Profile.objects.create(user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]})
+        Profile.objects.create(
+            user=self.user, name="B", source_categories={"arxiv": ["cs.LG", "math.CO"]}
         )
-        self.assertEqual(cats, ["cs.AI"])
+        groups = self._filter_sources()
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["name"], "arxiv")
+        self.assertEqual(groups[0]["label"], "arXiv")
+        self.assertEqual(
+            [c["code"] for c in groups[0]["categories"]],
+            ["cs.AI", "cs.LG", "math.CO"],
+        )
+        # Each pill carries its own source's label, so the JS needs no lookup.
+        self.assertIn("cs.AI", groups[0]["categories"][0]["label"])
+
+    def test_filter_sources_scoped_to_selected_profile(self):
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
+        Profile.objects.create(
+            user=self.user, name="B", source_categories={"arxiv": ["cs.LG", "math.CO"]}
+        )
+        groups = self._filter_sources(f"/recommendations/?profile={pa.pk}")
+        self.assertEqual([c["code"] for c in groups[0]["categories"]], ["cs.AI"])
+
+    def test_filter_sources_grouped_per_source(self):
+        """Codes are grouped by server, and a shared code appears under each."""
+        Profile.objects.create(
+            user=self.user,
+            name="A",
+            source_categories={"arxiv": ["cs.AI"], "biorxiv": ["cs.AI", "neuro"]},
+        )
+        groups = {g["name"]: [c["code"] for c in g["categories"]] for g in self._filter_sources()}
+        self.assertEqual(groups, {"arxiv": ["cs.AI"], "biorxiv": ["cs.AI", "neuro"]})
+
+    def test_filter_sources_empty_without_selections(self):
+        Profile.objects.create(user=self.user, name="A", source_categories={})
+        self.assertEqual(self._filter_sources(), [])
+
+    def test_source_labels_follow_enabled_count_not_results(self):
+        """Filter pills are named per enabled source, not per source in use."""
+        Profile.objects.create(user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]})
+        self.assertFalse(self.client.get("/recommendations/").context["show_source_labels"])
+        with patch("core.sources.enabled_names", return_value=["arxiv", "biorxiv"]):
+            resp = self.client.get("/recommendations/")
+        self.assertTrue(resp.context["show_source_labels"])
 
     def test_selected_profile_filters_recs(self):
-        pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
-        pb = Profile.objects.create(user=self.user, name="B", categories=["cs.LG"])
+        pa = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
+        pb = Profile.objects.create(
+            user=self.user, name="B", source_categories={"arxiv": ["cs.LG"]}
+        )
         self._rec(self._run_for(pa), _make_paper("2301.00001", "A"), 0.8)
         self._rec(self._run_for(pb), _make_paper("2301.00002", "B"), 0.7)
         recs = json.loads(
@@ -254,7 +364,9 @@ class RecommendationAddToProfileTests(_RecTestBase):
     def setUp(self):
         super().setUp()
         self.client.login(username="rec@example.com", password="SecurePass123!")
-        self.profile = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
+        self.profile = Profile.objects.create(
+            user=self.user, name="A", source_categories={"arxiv": ["cs.AI"]}
+        )
 
     def _add(self, profile_id, paper_id):
         return self.client.post(
@@ -292,7 +404,9 @@ class RecommendationAddToProfileTests(_RecTestBase):
         # Paper recommended only to a different user -> not addable by this user.
         other = PBUser.objects.create_user(email="other@example.com", password="SecurePass123!")
         other_ref = Corpus.objects.create(user=other, name="ref_arxiv")
-        other_p = Profile.objects.create(user=other, name="OB", categories=["cs.LG"])
+        other_p = Profile.objects.create(
+            user=other, name="OB", source_categories={"arxiv": ["cs.LG"]}
+        )
         other_run = RecommendationRun.objects.create(
             user=other,
             user_corpus=_get_or_create_user_corpus(other, other_p),
@@ -316,7 +430,9 @@ class RecommendationAddToProfileTests(_RecTestBase):
         paper = _make_paper("2301.00001", "Rec Paper")
         self._recommend(paper)
         other = PBUser.objects.create_user(email="other2@example.com", password="SecurePass123!")
-        other_p = Profile.objects.create(user=other, name="OP", categories=["cs.AI"])
+        other_p = Profile.objects.create(
+            user=other, name="OP", source_categories={"arxiv": ["cs.AI"]}
+        )
         resp = self._add(other_p.pk, paper.pk)
         self.assertEqual(resp.status_code, 404)
 

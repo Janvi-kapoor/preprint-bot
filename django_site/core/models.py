@@ -17,6 +17,8 @@ from pgvector.django import VectorField
 
 from preprint_sources import all_source_names, get_source
 
+from .sources import source_label as _source_label
+
 # ── Users ──────────────────────────────────────────────────────────────────
 
 
@@ -92,7 +94,8 @@ class Profile(models.Model):
     user = models.ForeignKey(PBUser, on_delete=models.CASCADE, related_name="profiles")
     name = models.CharField(max_length=255)
     keywords = ArrayField(models.TextField(), default=list, blank=True)
-    categories = ArrayField(models.TextField(), default=list, blank=True)
+    # {source_name: [leaf category codes]}
+    source_categories = models.JSONField(default=dict, blank=True)
     email_notify = models.BooleanField(default=True)
     frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default="daily")
     threshold = models.FloatField(default=0.6)
@@ -116,6 +119,36 @@ class Profile(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.user})"
+
+    @property
+    def categories_by_source(self):
+        """``source_categories`` as a plain dict, tolerating legacy rows."""
+        raw = self.source_categories
+        if isinstance(raw, dict):
+            return {k: list(v or []) for k, v in raw.items()}
+        # Handle rows written before the per-source migration which may still
+        # hold a flat list of arXiv categories.
+        if isinstance(raw, list):
+            return {"arxiv": list(raw)} if raw else {}
+        return {}
+
+    @property
+    def category_codes(self):
+        """Category codes across sources, deduplicated, in source order.
+
+        For displays and filters that do not care which server a code came
+        from. Anything source-sensitive should use ``categories_by_source``.
+        """
+        codes = []
+        for source_codes in self.categories_by_source.values():
+            for code in source_codes:
+                if code not in codes:
+                    codes.append(code)
+        return codes
+
+    def categories_for(self, source_name):
+        """Codes selected for one source, or an empty list."""
+        return self.categories_by_source.get(source_name, [])
 
 
 # ── Corpora ────────────────────────────────────────────────────────────────
@@ -206,6 +239,11 @@ class Paper(models.Model):
         if not self.source_id or self.source not in all_source_names():
             return ""
         return get_source(self.source).landing_url(self.source_id)
+
+    @property
+    def source_label(self):
+        """Human-facing source name for UI badges, e.g. ``arXiv``."""
+        return _source_label(self.source)
 
     @property
     def categories_list(self):

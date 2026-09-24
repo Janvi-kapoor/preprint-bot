@@ -9,7 +9,7 @@ import logging
 import sys
 import traceback
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 from datetime import datetime, timezone, date as date_type
 from email.utils import parsedate_to_datetime
 import requests
@@ -30,43 +30,85 @@ from .extract_grobid import extract_grobid_sections
 from .summarization_script import TransformerSummarizer
 from .user_mode_processor import process_unprocessed_papers
 from .db_similarity_matcher import run_similarity_matching
-from preprint_sources import ArxivSource, PaperEntry
+from preprint_sources import PaperEntry, enabled_names, enabled_sources
 
 
-async def get_all_profile_categories(api_client: APIClient) -> List[str]:
+async def get_all_profile_categories(api_client: APIClient) -> Dict[str, List[str]]:
+    """Union every profile's category selections, keyed by source name."""
     try:
         response = await api_client.client.get(f"{api_client.base_url}/profiles/")
         response.raise_for_status()
         profiles = response.json()
-        all_categories = set()
+        by_source: Dict[str, set] = {}
         for profile in profiles:
-            all_categories.update(profile.get("categories", []))
-        categories_list = list(all_categories)
-        print(
-            f"Found {len(categories_list)} unique categories from user profiles: {categories_list}"
-        )
-        return categories_list
+            for source_name, codes in (profile.get("source_categories") or {}).items():
+                by_source.setdefault(source_name, set()).update(codes or [])
+        result = {name: sorted(codes) for name, codes in by_source.items() if codes}
+        total = sum(len(c) for c in result.values())
+        print(f"Found {total} unique categories from user profiles: {result}")
+        return result
     except Exception as e:
         print(f"Error fetching profile categories: {e}")
-        return []
+        return {}
 
 
 async def fetch_preprint_papers(
-    categories: List[str],
+    categories_by_source: Dict[str, List[str]],
     target_date: datetime = None,
 ) -> List[PaperEntry]:
-    """Fetch new papers from configured preprint sources.
+    """Fetch new papers from every enabled source that has categories selected.
 
-    When ``target_date`` is None, fetches the latest announcement.
-    When a date is provided, fetches papers for that specific
-    historical date.
+    When ``target_date`` is None, fetches each source's latest announcement.
+    When a date is given, fetches that date from the sources that support
+    historical fetching; the rest are skipped.
+
+    A source that errors is reported and skipped. If nothing succeeds
+    and something failed, a runtime error is raised.
     """
-    source = ArxivSource()
+    selected = {name: codes for name, codes in categories_by_source.items() if codes}
 
-    if target_date is None:
-        return await source.fetch_latest(categories)
-    else:
-        return await source.fetch_by_date(target_date, categories)
+    # Selections can outlive a source being turned off; they are kept on the
+    # profile deliberately, but there is nothing to fetch from them.
+    unreachable = sorted(set(selected) - set(enabled_names()))
+    if unreachable:
+        print(f"  Ignoring categories for disabled source(s): {', '.join(unreachable)}")
+
+    sources = [src for src in enabled_sources() if selected.get(src.name)]
+    if not sources:
+        print("  No enabled source has categories selected — nothing to fetch.")
+        return []
+
+    entries: List[PaperEntry] = []
+    failures: List[str] = []
+    succeeded = 0
+
+    for source in sources:
+        categories = selected[source.name]
+        try:
+            if target_date is None:
+                found = await source.fetch_latest(categories)
+            else:
+                found = await source.fetch_by_date(target_date, categories)
+        except NotImplementedError:
+            # fetch_by_date is an optional capability of PreprintSource.
+            print(f"  {source.label}: no historical fetch support — skipped.")
+            continue
+        except Exception as e:
+            failures.append(f"{source.label} ({type(e).__name__}: {e})")
+            print(f"  {source.label}: FAILED — {type(e).__name__}: {e}")
+            continue
+
+        succeeded += 1
+        entries.extend(found)
+        print(f"  {source.label}: {len(found)} papers")
+
+    if failures and succeeded == 0:
+        raise RuntimeError("every preprint source failed: " + "; ".join(failures))
+    if failures:
+        print(f"  WARNING: continuing without {len(failures)} failed source(s).")
+
+    print(f"  Total: {len(entries)} papers from {succeeded} source(s)")
+    return entries
 
 
 async def store_fetched_papers(
@@ -101,7 +143,7 @@ async def store_fetched_papers(
     paper_ids: set[int] = set()  # all paper IDs (new + existing)
     new_paper_ids: set[int] = set()  # only newly created papers
     for paper in entries:
-        existing = await api_client.get_paper_by_source_id(paper.source_id)
+        existing = await api_client.get_paper_by_source_id(paper.source_id, paper.source)
         if existing:
             paper_ids.add(existing["id"])
             continue
@@ -134,7 +176,7 @@ async def store_fetched_papers(
                     **paper.metadata,
                 },
                 source=paper.source,
-                pdf_path=str(PDF_DIR / f"{safe_filename(paper.source_id)}.pdf"),
+                pdf_path=str(PDF_DIR / f"{safe_filename(paper.source_id, paper.source)}.pdf"),
                 submitted_date=submitted_date,
             )
             paper_ids.add(created["id"])
@@ -147,7 +189,15 @@ async def store_fetched_papers(
 
     if not skip_download and stored_count > 0:
         stats = download_arxiv_pdfs(
-            [{"pdf_url": p.pdf_url, "source_id": p.source_id, "arxiv_url": p.url} for p in entries],
+            [
+                {
+                    "pdf_url": p.pdf_url,
+                    "source_id": p.source_id,
+                    "source": p.source,
+                    "arxiv_url": p.url,
+                }
+                for p in entries
+            ],
             output_folder=str(PDF_DIR),
             use_s3=False,
             min_delay=3,
@@ -167,6 +217,17 @@ async def store_fetched_papers(
     return corpus["id"], paper_ids, new_paper_ids, stored_count
 
 
+def _papers_matching(papers: List[dict], entries: List[PaperEntry]) -> List[dict]:
+    """Corpus rows corresponding to *entries*, keyed by source and id.
+
+    Keyed on the pair because an id is only unique within its own server: on
+    the id alone, a row fetched from one source would also match an entry
+    from another and be re-parsed and re-summarized every run.
+    """
+    keys = {(e.source, e.source_id) for e in entries}
+    return [p for p in papers if (p.get("source"), p.get("source_id")) in keys]
+
+
 async def _parse_and_store_sections(
     api_client: APIClient, corpus_id: int, entries: List[PaperEntry]
 ):
@@ -176,8 +237,7 @@ async def _parse_and_store_sections(
     this goes straight from GROBID's structured output to the database.
     """
     papers = await api_client.get_papers_by_corpus(corpus_id)
-    entry_ids = {e.source_id for e in entries}
-    papers = [p for p in papers if p.get("source_id") in entry_ids]
+    papers = _papers_matching(papers, entries)
 
     parsed = 0
     for paper in papers:
@@ -220,8 +280,7 @@ async def summarize_papers(
 ):
     print(f"\nGenerating summaries using {type(summarizer).__name__}...")
     papers = await api_client.get_papers_by_corpus(corpus_id)
-    entry_ids = {e.source_id for e in entries}
-    papers = [p for p in papers if p.get("source_id") in entry_ids]
+    papers = _papers_matching(papers, entries)
 
     if paper_ids is not None:
         papers = [p for p in papers if p["id"] in paper_ids]
@@ -477,9 +536,9 @@ async def run_pipeline(args):
         print("\n" + "=" * 60)
         print("STEP 2: Getting Categories from User Profiles")
         print("=" * 60)
-        categories = await get_all_profile_categories(api_client)
+        categories_by_source = await get_all_profile_categories(api_client)
 
-        if not categories:
+        if not categories_by_source:
             print("ERROR: No categories found in user profiles.")
             print("Please create user profiles with categories before running the pipeline.")
             if processing_run_id is not None:
@@ -497,7 +556,7 @@ async def run_pipeline(args):
         print("STEP 3: Fetching Preprint Papers")
         print("=" * 60)
         entries = await fetch_preprint_papers(
-            categories,
+            categories_by_source,
             target_date=target_date if args.date else None,
         )
 

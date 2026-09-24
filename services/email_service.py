@@ -7,6 +7,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Dict
 
+from preprint_sources import all_source_names, get_source
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import (  # noqa: E402
     EMAIL_HOST,
@@ -35,6 +37,19 @@ def truncate_to_sentences(text: str, n: int = 3) -> tuple[str, bool]:
     return " ".join(sentences[:n]), True
 
 
+def paper_landing_url(paper: Dict) -> str:
+    """Source-aware landing page for a digest row, or "" if there isn't one.
+
+    User uploads and papers from a source the deployment no longer registers
+    have nowhere to link to; callers fall back to the dashboard.
+    """
+    source_id = paper.get("source_id") or ""
+    source = paper.get("source") or ""
+    if not source_id or source not in all_source_names():
+        return ""
+    return get_source(source).landing_url(source_id)
+
+
 def format_authors(authors: List[str], cap: int = 25) -> str:
     """Join author names, capping at *cap* names with 'et al.'."""
     if not authors:
@@ -55,14 +70,12 @@ def build_digest_html(
     papers = papers[:10]
     rows = ""
     for i, paper in enumerate(papers, 1):
-        source_id = paper.get("source_id", "")
         title = paper.get("title", "No title")
         score = paper.get("score", 0)
         authors = format_authors(paper.get("authors") or [])
         summary = paper.get("summary_text") or paper.get("summary") or paper.get("abstract", "")
-        arxiv_url = paper.get("landing_url") or (
-            f"https://arxiv.org/abs/{source_id}" if source_id else "#"
-        )
+# Papers with no public landing page point back at the dashboard
+        arxiv_url = paper.get("landing_url") or RECOMMENDATIONS_URL
 
         truncated_summary, was_truncated = truncate_to_sentences(summary, 3)
         read_more = (
@@ -81,7 +94,7 @@ def build_digest_html(
         <tr>
             <td style="padding:12px;border-bottom:1px solid #eee;vertical-align:top;width:30px;color:#888;">{i}</td>
             <td style="padding:12px;border-bottom:1px solid #eee;vertical-align:top;">
-                <a href="{html.escape(arxiv_url)}" style="font-size:15px;font-weight:bold;color:{SU_NAVY};text-decoration:none;">{html.escape(title)}</a>{authors_html}
+                <a href="{html.escape(paper_url)}" style="font-size:15px;font-weight:bold;color:{SU_NAVY};text-decoration:none;">{html.escape(title)}</a>{authors_html}
                 <br>
                 <span style="font-size:12px;color:#888;">Score: {score:.3f}</span>
                 <p style="margin:8px 0 0;font-size:13px;color:#444;">{html.escape(truncated_summary)}{read_more}</p>
