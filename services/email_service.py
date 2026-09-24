@@ -8,7 +8,7 @@ from email.mime.text import MIMEText
 from typing import List, Dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config import (
+from config import (  # noqa: E402
     EMAIL_HOST,
     EMAIL_PORT,
     EMAIL_USER,
@@ -19,7 +19,7 @@ from config import (
 )
 
 try:
-    from config import ADMIN_EMAIL
+    from config import ADMIN_EMAIL  # noqa: E402
 except ImportError:
     ADMIN_EMAIL = ""
 
@@ -55,16 +55,14 @@ def build_digest_html(
     papers = papers[:10]
     rows = ""
     for i, paper in enumerate(papers, 1):
-        arxiv_id = paper.get("arxiv_id", "")
+        source_id = paper.get("source_id", "")
         title = paper.get("title", "No title")
         score = paper.get("score", 0)
         authors = format_authors(paper.get("authors") or [])
-        summary = (
-            paper.get("summary_text")
-            or paper.get("summary")
-            or paper.get("abstract", "")
+        summary = paper.get("summary_text") or paper.get("summary") or paper.get("abstract", "")
+        arxiv_url = paper.get("landing_url") or (
+            f"https://arxiv.org/abs/{source_id}" if source_id else "#"
         )
-        arxiv_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "#"
 
         truncated_summary, was_truncated = truncate_to_sentences(summary, 3)
         read_more = (
@@ -147,12 +145,10 @@ def send_email(to_address: str, subject: str, html_body: str) -> bool:
 
 def send_admin_alert(subject: str, detail: str) -> bool:
     """Email the admin about a pipeline failure."""
-    # Fall back to EMAIL_FROM_ADDRESS when ADMIN_EMAIL is not configured
     recipient = ADMIN_EMAIL or EMAIL_FROM_ADDRESS
     if not recipient:
         print("Admin alert skipped: no ADMIN_EMAIL or EMAIL_FROM_ADDRESS set.")
         return False
-    # Strip CR/LF to prevent header injection, and bound the subject length.
     subject = subject.replace("\r", " ").replace("\n", " ")[:300]
     html_body = (
         "<p>The Preprint Bot pipeline reported an error:</p>"
@@ -178,8 +174,6 @@ def send_recommendations_digest(
         "monthly": f"monthly digest \u00b7 {run_date}",
     }.get(frequency, run_date)
     subject = f"Preprint Bot: {total} new recommendations for '{profile_name}' ({digest_label})"
-    html_body = build_digest_html(
-        profile_name, papers, run_date, shown, total, frequency
-    )
+    html_body = build_digest_html(profile_name, papers, run_date, shown, total, frequency)
     success = send_email(to_address, subject, html_body)
     return success, subject, html_body
