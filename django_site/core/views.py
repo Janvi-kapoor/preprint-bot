@@ -1110,35 +1110,35 @@ def paper_add_arxiv_view(request, profile_id):
     pb_user = request.pb_user
     profile = get_object_or_404(Profile, pk=profile_id, user=pb_user)
 
-    raw = request.POST.get("arxiv_ids", "")
-    arxiv_ids = _parse_arxiv_ids(raw)
+    raw = request.POST.get("source_ids", "")
+    source_ids = _parse_source_ids(raw)
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
-    if not arxiv_ids:
+    if not source_ids:
         if is_ajax:
             return JsonResponse({"ok": False, "error": "No valid arXiv IDs provided."}, status=400)
         messages.error(request, "No valid arXiv IDs provided.")
         return redirect(_safe_next(request, "profile_list"))
 
-    if not is_ajax and len(arxiv_ids) > MAX_IDS_PER_REQUEST:
+    if not is_ajax and len(source_ids) > MAX_IDS_PER_REQUEST:
         messages.warning(
             request,
-            f"Too many IDs ({len(arxiv_ids)}). Only the first {MAX_IDS_PER_REQUEST} will be processed.",
+            f"Too many IDs ({len(source_ids)}). Only the first {MAX_IDS_PER_REQUEST} will be processed.",
         )
-        arxiv_ids = arxiv_ids[:MAX_IDS_PER_REQUEST]
+        source_ids = source_ids[:MAX_IDS_PER_REQUEST]
 
     if is_ajax:
         # AJAX: process a single ID and return the paper info
-        aid = arxiv_ids[0]
+        aid = source_ids[0]
         success, failed = _download_arxiv_pdfs(pb_user, profile, [aid])
         if failed:
             return JsonResponse({"ok": False, "error": f"Failed to download {aid}."}, status=400)
         # Look up the paper to return its info for the DOM
-        paper = Paper.objects.filter(arxiv_id=aid).order_by("-id").first()
+        paper = Paper.objects.filter(source_id=aid).order_by("-id").first()
         if not paper:
             # Legacy data may have version suffix (e.g., 2507.08778v1);
             # prefer the newest matching row deterministically.
-            paper = Paper.objects.filter(arxiv_id__startswith=aid + "v").order_by("-id").first()
+            paper = Paper.objects.filter(source_id__startswith=aid + "v").order_by("-id").first()
         if not paper:
             return JsonResponse(
                 {
@@ -1153,13 +1153,13 @@ def paper_add_arxiv_view(request, profile_id):
                 "paper": {
                     "id": paper.pk,
                     "title": paper.title,
-                    "arxiv_id": paper.arxiv_id,
+                    "source_id": paper.source_id,
                     "source": paper.source,
                 },
             }
         )
 
-    success, failed = _download_arxiv_pdfs(pb_user, profile, arxiv_ids)
+    success, failed = _download_arxiv_pdfs(pb_user, profile, source_ids)
     if success:
         messages.success(request, f"Added {success} paper(s) from arXiv.")
     for fid in failed:
@@ -1168,7 +1168,7 @@ def paper_add_arxiv_view(request, profile_id):
     return redirect(_safe_next(request, "profile_list"))
 
 
-def _parse_arxiv_ids(raw: str) -> list[str]:
+def _parse_source_ids(raw: str) -> list[str]:
     """Extract valid arXiv IDs from free-form input."""
     ids = []
     for line in raw.replace(",", "\n").splitlines():
@@ -1188,10 +1188,10 @@ def _parse_arxiv_ids(raw: str) -> list[str]:
     return ids
 
 
-def _fetch_arxiv_metadata(arxiv_ids):
+def _fetch_arxiv_metadata(source_ids):
     """Batch-fetch metadata (title, abstract, date) from arXiv API.
 
-    Returns a dict keyed by arxiv_id (version-stripped).
+    Returns a dict keyed by source_id (version-stripped).
     Falls back gracefully if the arxiv package is unavailable.
     """
     metadata = {}
@@ -1199,7 +1199,7 @@ def _fetch_arxiv_metadata(arxiv_ids):
         import arxiv as arxiv_lib
 
         client = arxiv_lib.Client()
-        search = arxiv_lib.Search(id_list=arxiv_ids)
+        search = arxiv_lib.Search(id_list=source_ids)
         for paper in client.results(search):
             aid = paper.get_short_id().split("v")[0]  # strip version
             metadata[aid] = {
@@ -1218,7 +1218,7 @@ def _fetch_arxiv_metadata(arxiv_ids):
     return metadata
 
 
-def _download_arxiv_pdfs(pb_user, profile, arxiv_ids):
+def _download_arxiv_pdfs(pb_user, profile, source_ids):
     """Download PDFs for a list of arXiv IDs, deduplicating by SHA-256.
 
     Creates Paper rows and links them to the profile's corpus.
@@ -1232,11 +1232,11 @@ def _download_arxiv_pdfs(pb_user, profile, arxiv_ids):
     corpus = _get_or_create_user_corpus(pb_user, profile)
 
     # Batch-fetch metadata (title, abstract, date) from arXiv API
-    arxiv_meta = _fetch_arxiv_metadata(arxiv_ids)
+    arxiv_meta = _fetch_arxiv_metadata(source_ids)
 
     success = 0
     failed = []
-    for i, aid in enumerate(arxiv_ids):
+    for i, aid in enumerate(source_ids):
         # Respect arXiv rate limits: no more than one request every 3 seconds
         if i > 0:
             time.sleep(3)
@@ -1281,7 +1281,7 @@ def _download_arxiv_pdfs(pb_user, profile, arxiv_ids):
 
             try:
                 paper = Paper.objects.create(
-                    arxiv_id=aid,
+                    source_id=aid,
                     sha256=file_hash,
                     title=meta.get("title", aid),
                     abstract=meta.get("abstract"),
@@ -1346,11 +1346,11 @@ def paper_search_arxiv_api_view(request, profile_id):
             sort_order=arxiv_lib.SortOrder.Descending,
         )
 
-        # Existing paper arxiv_ids for this profile (to flag already-added ones)
+        # Existing paper source_ids for this profile (to flag already-added ones)
         corpus = _get_or_create_user_corpus(pb_user, profile)
         existing_ids = set(
-            Paper.objects.filter(corpora=corpus, arxiv_id__isnull=False).values_list(
-                "arxiv_id", flat=True
+            Paper.objects.filter(corpora=corpus, source_id__isnull=False).values_list(
+                "source_id", flat=True
             )
         )
 
@@ -1365,7 +1365,7 @@ def paper_search_arxiv_api_view(request, profile_id):
                 authors_str = ", ".join(author_names)
             results.append(
                 {
-                    "arxiv_id": aid,
+                    "source_id": aid,
                     "title": paper.title,
                     "authors": authors_str,
                     "published": paper.published.strftime("%Y-%m-%d"),
@@ -1498,7 +1498,7 @@ def _query_profile_recommendations(pb_user, profile=None):
     recs_list = list(
         Recommendation.objects.filter(run__in=runs)
         .select_related("paper", "run")
-        .order_by("-paper__submitted_date", "-score", "paper__arxiv_id")[:5000]
+        .order_by("-paper__submitted_date", "-score", "paper__source_id")[:5000]
     )
 
     # Prefetch summaries for all papers in one query
@@ -1518,11 +1518,11 @@ def _query_profile_recommendations(pb_user, profile=None):
         if pid:
             profile_paper_ids.setdefault(pid, set()).add(paper_pk)
 
-    # Deduplicate by arxiv_id keeping highest score
+    # Deduplicate by source_id keeping highest score
     seen = {}
     for rec in recs_list:
         paper = rec.paper
-        aid = paper.arxiv_id or f"_pk_{paper.pk}"
+        aid = paper.source_id or f"_pk_{paper.pk}"
         if aid in seen and rec.score <= seen[aid]["score"]:
             continue
 
@@ -1539,7 +1539,7 @@ def _query_profile_recommendations(pb_user, profile=None):
             "title": paper.title,
             "score": rec.score,
             "rank": rec.rank,
-            "arxiv_id": paper.arxiv_id,
+            "source_id": paper.source_id,
             "abstract": paper.abstract or "",
             "summary_text": summaries_map.get(paper.pk, ""),
             "date_obj": date_obj,
@@ -1583,7 +1583,7 @@ def recommendation_add_to_profile_view(request, profile_id, paper_id):
             "paper": {
                 "id": paper.pk,
                 "title": paper.title,
-                "arxiv_id": paper.arxiv_id,
+                "source_id": paper.source_id,
             },
         }
     )
