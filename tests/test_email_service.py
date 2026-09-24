@@ -5,6 +5,7 @@ import pytest
 
 MODULE = "services.email_service"
 
+
 @pytest.fixture
 def email_service(monkeypatch):
     """Fixture to reload email_service with fresh config mocking safely."""
@@ -17,9 +18,9 @@ def email_service(monkeypatch):
     config_mock.EMAIL_FROM_NAME = "Test"
     config_mock.SITE_URL = "https://example.com"
     config_mock.ADMIN_EMAIL = "admin@example.com"
-    
+
     monkeypatch.setitem(sys.modules, "config", config_mock)
-    
+
     cached = sys.modules.pop(MODULE, None)
     try:
         yield importlib.import_module(MODULE)
@@ -33,8 +34,10 @@ def email_service(monkeypatch):
             if hasattr(sys.modules.get("services"), "email_service"):
                 delattr(sys.modules["services"], "email_service")
 
+
 def test_recommendations_url_configuration(email_service):
     assert email_service.RECOMMENDATIONS_URL.endswith("/recommendations/")
+
 
 def test_digest_email_links(email_service):
     papers = [
@@ -51,6 +54,6 @@ def test_digest_email_links(email_service):
         run_date="2026-09-04",
         shown=1,
         total=1,
-        frequency="daily"
+        frequency="daily",
     )
     assert email_service.RECOMMENDATIONS_URL in html
