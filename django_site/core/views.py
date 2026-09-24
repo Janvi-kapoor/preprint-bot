@@ -1788,22 +1788,9 @@ def recommendation_create_profile_view(request, paper_id):
     if Profile.objects.filter(user=pb_user, name__iexact=name).exists():
         return JsonResponse({"ok": False, "error": f"A profile named '{name}' already exists."}, status=400)
         
-    # Extract categories from paper metadata
-    raw_categories = []
-    if paper.metadata and isinstance(paper.metadata, dict) and "categories" in paper.metadata:
-        raw_categories = paper.metadata["categories"]
-        
-    # Validate categories using ProfileForm.clean_categories if applicable, or fallback safely
-    form = ProfileForm(data={"name": name, "categories": ",".join(raw_categories) if isinstance(raw_categories, list) else raw_categories})
-    # If form has clean_categories validation
-    categories = raw_categories
-    if hasattr(form, "clean_categories") and raw_categories:
-        try:
-            form.cleaned_data = {"categories": raw_categories}
-            categories = form.clean_categories() or raw_categories
-        except Exception:
-            categories = raw_categories
-
+    # Use paper.categories_list directly as suggested by reviewer
+    categories = getattr(paper, "categories_list", [])
+    
     try:
         with transaction.atomic():
             profile = Profile.objects.create(
@@ -1815,8 +1802,6 @@ def recommendation_create_profile_view(request, paper_id):
             _link_paper_to_corpus(paper, corpus)
     except IntegrityError:
         return JsonResponse({"ok": False, "error": "A profile with that name already exists."}, status=400)
-    except Exception as e:
-        return JsonResponse({"ok": False, "error": str(e)}, status=400)
         
     return JsonResponse({
         "ok": True,
