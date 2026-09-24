@@ -1,3 +1,5 @@
+from django.utils import timezone
+
 """Tests for _query_profile_recommendations and recommendations_view."""
 
 import json

@@ -1110,7 +1110,7 @@ def paper_add_arxiv_view(request, profile_id):
     pb_user = request.pb_user
     profile = get_object_or_404(Profile, pk=profile_id, user=pb_user)
 
-    raw = request.POST.get("source_ids", "")
+    raw = request.POST.get("arxiv_ids", "")
     source_ids = _parse_source_ids(raw)
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
@@ -1168,7 +1168,7 @@ def paper_add_arxiv_view(request, profile_id):
     return redirect(_safe_next(request, "profile_list"))
 
 
-def _parse_source_ids(raw: str) -> list[str]:
+def _parse_arxiv_ids(raw: str) -> list[str]:
     """Extract valid arXiv IDs from free-form input."""
     ids = []
     for line in raw.replace(",", "\n").splitlines():
