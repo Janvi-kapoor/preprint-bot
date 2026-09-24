@@ -24,7 +24,11 @@ if not DEBUG and SECRET_KEY == _INSECURE_KEY:
         "Generate one with: python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'"
     )
 
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+]
 
 # ---------------------------------------------------------------------------
 # Application definition
@@ -125,7 +129,7 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 # PDF storage paths (mirrors FastAPI config)
 PDF_DATA_DIR = Path(os.getenv("PDF_DATA_DIR", BASE_DIR.parent / "pdf_data"))
-USER_PDF_DIR = PDF_DATA_DIR / "user_pdfs"          # legacy — used by FastAPI pipeline only
+USER_PDF_DIR = PDF_DATA_DIR / "user_pdfs"  # legacy — used by FastAPI pipeline only
 USER_PROCESSED_DIR = PDF_DATA_DIR / "user_processed"  # legacy — used by FastAPI pipeline only
 PAPER_STORAGE_DIR = PDF_DATA_DIR / "papers"  # hash-based deduplicated storage
 
@@ -162,7 +166,11 @@ ARXIV_SEARCH_PER_PAGE = int(os.getenv("ARXIV_SEARCH_PER_PAGE", 50))
 ACCENT_COLOR = os.getenv("ACCENT_COLOR", "")  # e.g. "#e65100" — overrides the default blue
 NAV_COLOR = os.getenv("NAV_COLOR", "")  # e.g. "#1b5e20" — overrides the dark navbar
 REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "True").lower() in ("true", "1", "yes")
-REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "False").lower() in ("true", "1", "yes")
+REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "False").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 # ---------------------------------------------------------------------------
 # ORCID OAuth2 (optional — leave ORCID_CLIENT_ID blank to disable)
@@ -190,7 +198,9 @@ if os.getenv("EMAIL_HOST"):
     DEFAULT_FROM_EMAIL = f"{_from_name} <{_from_addr}>"
 else:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
-    DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", f"noreply@{os.getenv('SITE_DOMAIN', 'localhost')}")
+    DEFAULT_FROM_EMAIL = os.getenv(
+        "DEFAULT_FROM_EMAIL", f"noreply@{os.getenv('SITE_DOMAIN', 'localhost')}"
+    )
 
 # ---------------------------------------------------------------------------
 # Local overrides (not committed to version control)
