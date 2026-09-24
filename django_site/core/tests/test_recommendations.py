@@ -17,14 +17,12 @@ from core.models import (
 from core.views import _get_or_create_user_corpus, _query_profile_recommendations
 
 
-def _make_paper(arxiv_id, title, submitted_date=None, categories=None, authors=None, abstract=""):
-    """Create a Paper (sha256 left null; metadata drives categories/authors)."""
+def _make_paper(arxiv_id, title, submitted_date=timezone.now(), abstract=None):
     return Paper.objects.create(
-        arxiv_id=arxiv_id,
+        source_id=arxiv_id,  # arxiv_id ko source_id kar diya hai
         title=title,
-        abstract=abstract,
+        abstract=abstract or "Test abstract text.",
         submitted_date=submitted_date,
-        metadata={"categories": categories or [], "authors": authors or []},
         source="arxiv",
     )
 

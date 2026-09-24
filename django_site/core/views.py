@@ -308,8 +308,6 @@ def register_view(request):
         if PBUser.objects.filter(email__iexact=email).exists():
             messages.error(request, "An account with that email already exists.")
         else:
-            from django.db import IntegrityError
-
             try:
                 pb_user = PBUser.objects.create_user(
                     email=email,
@@ -532,8 +530,6 @@ def orcid_complete_view(request):
                 "Sign in with your password to link your ORCID later.",
             )
         else:
-            from django.db import IntegrityError
-
             try:
                 pb_user = PBUser.objects.create_user(
                     email=email,
@@ -621,8 +617,8 @@ def forgot_password_view(request):
         try:
             pb_user = PBUser.objects.get(email__iexact=email)
             from django.contrib.auth.tokens import default_token_generator
-            from django.utils.http import urlsafe_base64_encode
             from django.utils.encoding import force_bytes
+            from django.utils.http import urlsafe_base64_encode
 
             uid = urlsafe_base64_encode(force_bytes(pb_user.pk))
             token = default_token_generator.make_token(pb_user)
@@ -1035,7 +1031,6 @@ def paper_upload_view(request, profile_id):
 
         # New paper — store file and create DB row
         dest = _store_paper_upload(file_hash, f)
-        from django.db import IntegrityError
 
         try:
             paper = Paper.objects.create(
@@ -1283,7 +1278,6 @@ def _download_arxiv_pdfs(pb_user, profile, arxiv_ids):
             # New paper — store file and create DB row
             dest = _store_paper_bytes(file_hash, resp.content)
             meta = arxiv_meta.get(aid, {})
-            from django.db import IntegrityError
 
             try:
                 paper = Paper.objects.create(
@@ -1905,7 +1899,6 @@ def recommendation_create_profile_view(request, paper_id):
             ),
         }
     )
-    # If form has clean_categories validation
     categories = raw_categories
     if hasattr(form, "clean_categories") and raw_categories:
         try:
