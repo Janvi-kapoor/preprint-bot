@@ -32,18 +32,14 @@ urlpatterns = [
     # Profiles
     path("profiles/", views.profile_list_view, name="profile_list"),
     path("profiles/create/", views.profile_create_view, name="profile_create"),
-    path(
-        "profiles/<int:profile_id>/edit/", views.profile_edit_view, name="profile_edit"
-    ),
+    path("profiles/<int:profile_id>/edit/", views.profile_edit_view, name="profile_edit"),
     path(
         "profiles/<int:profile_id>/delete/",
         views.profile_delete_view,
         name="profile_delete",
     ),
     # Onboarding (first-login walkthrough)
-    path(
-        "onboarding/profile/", views.onboarding_profile_view, name="onboarding_profile"
-    ),
+    path("onboarding/profile/", views.onboarding_profile_view, name="onboarding_profile"),
     path(
         "onboarding/papers/<int:profile_id>/",
         views.onboarding_papers_view,
@@ -101,9 +97,7 @@ urlpatterns = [
         views.pause_all_emails_view,
         name="pause_all_emails",
     ),
-    path(
-        "settings/deactivate/", views.deactivate_account_view, name="deactivate_account"
-    ),
+    path("settings/deactivate/", views.deactivate_account_view, name="deactivate_account"),
     path("settings/delete-account/", views.delete_account_view, name="delete_account"),
     # Help
     path("help/", views.help_view, name="help"),

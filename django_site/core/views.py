@@ -56,9 +56,7 @@ from .models import (
     Summary,
 )
 
-ARXIV_ID_RE = re.compile(
-    r"^(\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})$", re.IGNORECASE
-)
+ARXIV_ID_RE = re.compile(r"^(\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})$", re.IGNORECASE)
 
 
 # ── Paper storage helpers ──────────────────────────────────────────────────
@@ -127,9 +125,7 @@ def _get_or_create_user_corpus(pb_user, profile):
     corpus, _ = Corpus.objects.get_or_create(
         user=pb_user,
         name=corpus_name,
-        defaults={
-            "description": f"Papers for {pb_user.email}, profile '{profile.name}'"
-        },
+        defaults={"description": f"Papers for {pb_user.email}, profile '{profile.name}'"},
     )
     return corpus
 
@@ -269,10 +265,7 @@ def login_view(request):
         pb_user = authenticate_pbuser(request, email, password)
         if pb_user:
             # Block unverified users when verification is required
-            if (
-                django_settings.REQUIRE_EMAIL_VERIFICATION
-                and not pb_user.email_verified
-            ):
+            if django_settings.REQUIRE_EMAIL_VERIFICATION and not pb_user.email_verified:
                 request.session["resend_verification_email"] = pb_user.email
                 messages.error(request, "Please verify your email before signing in.")
                 return render(
@@ -453,9 +446,7 @@ def orcid_callback_view(request):
     redirect_uri = request.build_absolute_uri(reverse("orcid_callback"))
     token_data = orcid_helpers.exchange_code(code, redirect_uri)
     if not token_data or not token_data.get("orcid"):
-        messages.error(
-            request, "Failed to verify your ORCID credentials. Please try again."
-        )
+        messages.error(request, "Failed to verify your ORCID credentials. Please try again.")
         return redirect("login")
 
     orcid_id = token_data["orcid"]
@@ -465,18 +456,12 @@ def orcid_callback_view(request):
     # ── Link mode: attach ORCID to the logged-in user's account ──
     if request.session.pop("orcid_link_mode", False):
         if not request.user.is_authenticated:
-            messages.error(
-                request, "Your session expired. Please log in and try again."
-            )
+            messages.error(request, "Your session expired. Please log in and try again.")
             return redirect("login")
         # Check if this ORCID iD is already used by a different account
-        existing = (
-            PBUser.objects.filter(orcid_id=orcid_id).exclude(pk=request.user.pk).first()
-        )
+        existing = PBUser.objects.filter(orcid_id=orcid_id).exclude(pk=request.user.pk).first()
         if existing:
-            messages.error(
-                request, f"ORCID iD {orcid_id} is already linked to another account."
-            )
+            messages.error(request, f"ORCID iD {orcid_id} is already linked to another account.")
         else:
             request.user.orcid_id = orcid_id
             request.user.save(update_fields=["orcid_id"])
@@ -494,9 +479,7 @@ def orcid_callback_view(request):
         pass
 
     # New user — try to get their email from ORCID
-    orcid_email = (
-        orcid_helpers.fetch_email(orcid_id, access_token) if access_token else None
-    )
+    orcid_email = orcid_helpers.fetch_email(orcid_id, access_token) if access_token else None
 
     if orcid_email and not PBUser.objects.filter(email__iexact=orcid_email).exists():
         if not django_settings.REGISTRATION_OPEN:
@@ -669,13 +652,9 @@ def forgot_password_view(request):
                 reset_link = reset_url
         except PBUser.DoesNotExist:
             pass  # don't reveal whether the email exists
-        messages.success(
-            request, "If that email exists, a reset link has been generated."
-        )
+        messages.success(request, "If that email exists, a reset link has been generated.")
 
-    return render(
-        request, "auth/forgot_password.html", {"form": form, "reset_link": reset_link}
-    )
+    return render(request, "auth/forgot_password.html", {"form": form, "reset_link": reset_link})
 
 
 def reset_password_view(request, uidb64, token):
@@ -783,9 +762,7 @@ def profile_list_view(request):
                 "profile": profile,
                 "paper_count": len(papers),
                 "papers": papers,
-                "categories_display": [
-                    label_for(c) for c in (profile.categories or [])
-                ],
+                "categories_display": [label_for(c) for c in (profile.categories or [])],
             }
         )
 
@@ -846,9 +823,7 @@ def profile_edit_view(request, profile_id):
         form = ProfileForm(request.POST)
         if form.is_valid():
             name = form.cleaned_data["name"].strip()
-            dup = Profile.objects.filter(user=pb_user, name__iexact=name).exclude(
-                pk=profile.pk
-            )
+            dup = Profile.objects.filter(user=pb_user, name__iexact=name).exclude(pk=profile.pk)
             if dup.exists():
                 messages.error(request, f"A profile named '{name}' already exists.")
             else:
@@ -962,11 +937,7 @@ def onboarding_papers_view(request, profile_id):
 
     corpus_name = f"user_{pb_user.pk}_profile_{profile.pk}"
     corpus = Corpus.objects.filter(user=pb_user, name=corpus_name).first()
-    papers = (
-        list(Paper.objects.filter(corpora=corpus).order_by("-created_at"))
-        if corpus
-        else []
-    )
+    papers = list(Paper.objects.filter(corpora=corpus).order_by("-created_at")) if corpus else []
 
     return render(
         request,
@@ -988,9 +959,7 @@ def onboarding_finish_view(request):
     """Finish onboarding and land on the dashboard with a congrats note.
     Requires the profile to have at least one paper."""
     pb_user = request.pb_user
-    profile = get_object_or_404(
-        Profile, pk=request.POST.get("profile_id"), user=pb_user
-    )
+    profile = get_object_or_404(Profile, pk=request.POST.get("profile_id"), user=pb_user)
 
     corpus_name = f"user_{pb_user.pk}_profile_{profile.pk}"
     corpus = Corpus.objects.filter(user=pb_user, name=corpus_name).first()
@@ -1152,9 +1121,7 @@ def paper_add_arxiv_view(request, profile_id):
 
     if not arxiv_ids:
         if is_ajax:
-            return JsonResponse(
-                {"ok": False, "error": "No valid arXiv IDs provided."}, status=400
-            )
+            return JsonResponse({"ok": False, "error": "No valid arXiv IDs provided."}, status=400)
         messages.error(request, "No valid arXiv IDs provided.")
         return redirect(_safe_next(request, "profile_list"))
 
@@ -1170,19 +1137,13 @@ def paper_add_arxiv_view(request, profile_id):
         aid = arxiv_ids[0]
         success, failed = _download_arxiv_pdfs(pb_user, profile, [aid])
         if failed:
-            return JsonResponse(
-                {"ok": False, "error": f"Failed to download {aid}."}, status=400
-            )
+            return JsonResponse({"ok": False, "error": f"Failed to download {aid}."}, status=400)
         # Look up the paper to return its info for the DOM
         paper = Paper.objects.filter(arxiv_id=aid).order_by("-id").first()
         if not paper:
             # Legacy data may have version suffix (e.g., 2507.08778v1);
             # prefer the newest matching row deterministically.
-            paper = (
-                Paper.objects.filter(arxiv_id__startswith=aid + "v")
-                .order_by("-id")
-                .first()
-            )
+            paper = Paper.objects.filter(arxiv_id__startswith=aid + "v").order_by("-id").first()
         if not paper:
             return JsonResponse(
                 {
@@ -1432,19 +1393,14 @@ def paper_search_arxiv_api_view(request, profile_id):
         logger.exception("arXiv search failed")
         # Detect upstream rate limiting from arXiv
         is_rate_limited = (
-            hasattr(exc, "response")
-            and getattr(exc.response, "status_code", None) == 429
+            hasattr(exc, "response") and getattr(exc.response, "status_code", None) == 429
         ) or "429" in str(exc)
         if is_rate_limited:
             return JsonResponse(
-                {
-                    "error": "arXiv is rate-limiting requests. Please wait a minute and try again."
-                },
+                {"error": "arXiv is rate-limiting requests. Please wait a minute and try again."},
                 status=429,
             )
-        detail = (
-            str(exc) if django_settings.DEBUG else "Search failed. Please try again."
-        )
+        detail = str(exc) if django_settings.DEBUG else "Search failed. Please try again."
         return JsonResponse({"error": detail}, status=500)
 
 
@@ -1507,9 +1463,7 @@ def recommendations_view(request):
             "recs_json": json.dumps(recs),
             "categories_json": json.dumps(profile_categories),
             "code_to_label_json": json.dumps(ARXIV_CODE_TO_LABEL),
-            "profiles_json": json.dumps(
-                [{"id": p.pk, "name": p.name} for p in profiles]
-            ),
+            "profiles_json": json.dumps([{"id": p.pk, "name": p.name} for p in profiles]),
         },
     )
 
@@ -1530,9 +1484,7 @@ def _query_profile_recommendations(pb_user, profile=None):
     else:
         # All profiles: collect every user corpus
         user_corpora = list(
-            Corpus.objects.filter(
-                user=pb_user, name__startswith=f"user_{pb_user.pk}_profile_"
-            )
+            Corpus.objects.filter(user=pb_user, name__startswith=f"user_{pb_user.pk}_profile_")
         )
         if not user_corpora:
             return []
@@ -1588,9 +1540,7 @@ def _query_profile_recommendations(pb_user, profile=None):
             "paper_id": paper.pk,
             "profile_id": corpus_to_profile.get(rec.run.user_corpus_id),
             "in_corpus": [
-                prof_id
-                for prof_id, paper_set in profile_paper_ids.items()
-                if paper.pk in paper_set
+                prof_id for prof_id, paper_set in profile_paper_ids.items() if paper.pk in paper_set
             ],
             "title": paper.title,
             "score": rec.score,
@@ -1621,9 +1571,7 @@ def recommendation_add_to_profile_view(request, profile_id, paper_id):
     paper = get_object_or_404(Paper, pk=paper_id)
 
     # Verify the paper was actually recommended to this user
-    was_recommended = Recommendation.objects.filter(
-        paper=paper, run__user=pb_user
-    ).exists()
+    was_recommended = Recommendation.objects.filter(paper=paper, run__user=pb_user).exists()
     if not was_recommended:
         return JsonResponse({"ok": False, "error": "Paper not found."}, status=404)
 
@@ -1661,11 +1609,7 @@ def settings_view(request):
             pb_user.name = form.cleaned_data["name"]
             new_email = form.cleaned_data["email"]
             if new_email != pb_user.email:
-                if (
-                    PBUser.objects.filter(email__iexact=new_email)
-                    .exclude(pk=pb_user.pk)
-                    .exists()
-                ):
+                if PBUser.objects.filter(email__iexact=new_email).exclude(pk=pb_user.pk).exists():
                     messages.error(request, "That email is already taken.")
                 else:
                     pb_user.email = new_email
@@ -1674,9 +1618,7 @@ def settings_view(request):
             messages.success(request, "Settings updated.")
             return redirect("settings")
     else:
-        form = UserSettingsForm(
-            initial={"name": pb_user.name or "", "email": pb_user.email}
-        )
+        form = UserSettingsForm(initial={"name": pb_user.name or "", "email": pb_user.email})
 
     # Are ALL profiles paused?
     all_paused = profiles.exists() and not profiles.filter(email_notify=True).exists()
@@ -1760,9 +1702,7 @@ def delete_account_view(request):
     # Orphaned paper files are cleaned up by: python manage.py cleanup_orphan_papers
     pb_user.delete()
     logout_pbuser(request)
-    messages.success(
-        request, "Your account and all data have been permanently deleted."
-    )
+    messages.success(request, "Your account and all data have been permanently deleted.")
     return redirect("login")
 
 
@@ -1856,19 +1796,14 @@ def monitoring_dashboard_view(request):
     email_failure_rate = (email_failed / email_total * 100) if email_total else 0
     _recent_emails = EmailLog.objects.filter(sent_at__gte=since).select_related("user")
     recent_sent = list(_recent_emails.filter(status="sent").order_by("-sent_at")[:100])
-    recent_failed = list(
-        _recent_emails.filter(status="failed").order_by("-sent_at")[:100]
-    )
+    recent_failed = list(_recent_emails.filter(status="failed").order_by("-sent_at")[:100])
 
     # ── Ingestion (real; ArxivDailyStats is empty, so derive from Paper) ──
     total_papers = Paper.objects.count()
     papers_by_source = {
-        row["source"]: row["n"]
-        for row in Paper.objects.values("source").annotate(n=Count("id"))
+        row["source"]: row["n"] for row in Paper.objects.values("source").annotate(n=Count("id"))
     }
-    papers_with_abstract_emb = (
-        Paper.objects.filter(embeddings__type="abstract").distinct().count()
-    )
+    papers_with_abstract_emb = Paper.objects.filter(embeddings__type="abstract").distinct().count()
     papers_missing_embeddings = total_papers - papers_with_abstract_emb
     papers_per_day = _daily_series(Paper.objects.all(), window_days)
     papers_window_total = sum(r["n"] for r in papers_per_day)
@@ -1888,9 +1823,7 @@ def monitoring_dashboard_view(request):
     user_total = PBUser.objects.count()
     user_active = PBUser.objects.filter(is_active=True).count()
     user_verified = PBUser.objects.filter(email_verified=True).count()
-    user_with_orcid = (
-        PBUser.objects.exclude(orcid_id__isnull=True).exclude(orcid_id="").count()
-    )
+    user_with_orcid = PBUser.objects.exclude(orcid_id__isnull=True).exclude(orcid_id="").count()
     signups_per_day = _daily_series(PBUser.objects.all(), window_days)
     signups_window_total = sum(r["n"] for r in signups_per_day)
     profiles_total = Profile.objects.count()
@@ -1944,17 +1877,13 @@ def recommendation_create_profile_view(request, paper_id):
     pb_user = request.pb_user
     paper = get_object_or_404(Paper, pk=paper_id)
 
-    was_recommended = Recommendation.objects.filter(
-        paper=paper, run__user=pb_user
-    ).exists()
+    was_recommended = Recommendation.objects.filter(paper=paper, run__user=pb_user).exists()
     if not was_recommended:
         return JsonResponse({"ok": False, "error": "Paper not found."}, status=404)
 
     name = request.POST.get("name", "").strip()
     if not name:
-        return JsonResponse(
-            {"ok": False, "error": "Profile name is required."}, status=400
-        )
+        return JsonResponse({"ok": False, "error": "Profile name is required."}, status=400)
 
     if Profile.objects.filter(user=pb_user, name__iexact=name).exists():
         return JsonResponse(
@@ -1964,11 +1893,7 @@ def recommendation_create_profile_view(request, paper_id):
 
     # Extract categories from paper metadata
     raw_categories = []
-    if (
-        paper.metadata
-        and isinstance(paper.metadata, dict)
-        and "categories" in paper.metadata
-    ):
+    if paper.metadata and isinstance(paper.metadata, dict) and "categories" in paper.metadata:
         raw_categories = paper.metadata["categories"]
 
     # Validate categories using ProfileForm.clean_categories if applicable, or fallback safely
@@ -1976,9 +1901,7 @@ def recommendation_create_profile_view(request, paper_id):
         data={
             "name": name,
             "categories": (
-                ",".join(raw_categories)
-                if isinstance(raw_categories, list)
-                else raw_categories
+                ",".join(raw_categories) if isinstance(raw_categories, list) else raw_categories
             ),
         }
     )

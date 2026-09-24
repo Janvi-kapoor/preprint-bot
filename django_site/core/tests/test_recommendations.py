@@ -17,9 +17,7 @@ from core.models import (
 from core.views import _get_or_create_user_corpus, _query_profile_recommendations
 
 
-def _make_paper(
-    arxiv_id, title, submitted_date=None, categories=None, authors=None, abstract=""
-):
+def _make_paper(arxiv_id, title, submitted_date=None, categories=None, authors=None, abstract=""):
     """Create a Paper (sha256 left null; metadata drives categories/authors)."""
     return Paper.objects.create(
         arxiv_id=arxiv_id,
@@ -35,9 +33,7 @@ class _RecTestBase(TestCase):
     """Shared fixtures: a user, a reference corpus, and run/rec helpers."""
 
     def setUp(self):
-        self.user = PBUser.objects.create_user(
-            email="rec@example.com", password="SecurePass123!"
-        )
+        self.user = PBUser.objects.create_user(email="rec@example.com", password="SecurePass123!")
         # Every run needs a reference (arXiv) corpus; its name intentionally
         # does NOT match the user_<pk>_profile_<pk> pattern the query scans.
         self.ref = Corpus.objects.create(user=self.user, name="ref_arxiv")
@@ -85,12 +81,8 @@ class QueryProfileRecommendationsTests(_RecTestBase):
         pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
         d = datetime(2023, 6, 15, tzinfo=timezone.utc)
         # Two Paper rows sharing an arxiv_id, recommended in two different runs.
-        self._rec(
-            self._run_for(pa), _make_paper("2301.00001", "Low", submitted_date=d), 0.5
-        )
-        self._rec(
-            self._run_for(pa), _make_paper("2301.00001", "High", submitted_date=d), 0.9
-        )
+        self._rec(self._run_for(pa), _make_paper("2301.00001", "Low", submitted_date=d), 0.5)
+        self._rec(self._run_for(pa), _make_paper("2301.00001", "High", submitted_date=d), 0.9)
         results = _query_profile_recommendations(self.user, pa)
         self.assertEqual(len(results), 1)
         self.assertAlmostEqual(results[0]["score"], 0.9)
@@ -124,16 +116,12 @@ class QueryProfileRecommendationsTests(_RecTestBase):
         run = self._run_for(pa)
         p1 = _make_paper("2301.00001", "Has Summary")
         p2 = _make_paper("2301.00002", "No Abstract Summary")
-        Summary.objects.create(
-            paper=p1, mode="abstract", summary_text="A concise summary."
-        )
+        Summary.objects.create(paper=p1, mode="abstract", summary_text="A concise summary.")
         # A 'full'-mode summary must NOT be used — only 'abstract'.
         Summary.objects.create(paper=p2, mode="full", summary_text="Full-text summary.")
         self._rec(run, p1, 0.8, rank=1)
         self._rec(run, p2, 0.7, rank=2)
-        by_aid = {
-            r["arxiv_id"]: r for r in _query_profile_recommendations(self.user, pa)
-        }
+        by_aid = {r["arxiv_id"]: r for r in _query_profile_recommendations(self.user, pa)}
         self.assertEqual(by_aid["2301.00001"]["summary_text"], "A concise summary.")
         self.assertEqual(by_aid["2301.00002"]["summary_text"], "")
 
@@ -152,18 +140,14 @@ class QueryProfileRecommendationsTests(_RecTestBase):
         self.assertEqual(_query_profile_recommendations(self.user, pa), [])
 
     def test_all_profiles_no_corpora_returns_empty(self):
-        Profile.objects.create(
-            user=self.user, name="A", categories=["cs.AI"]
-        )  # no corpus
+        Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])  # no corpus
         self.assertEqual(_query_profile_recommendations(self.user, None), [])
 
     def test_user_isolation(self):
         pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
         self._rec(self._run_for(pa), _make_paper("2301.00001", "Mine"), 0.8)
         # Another user with their own profile/run/recommendation.
-        other = PBUser.objects.create_user(
-            email="other@example.com", password="SecurePass123!"
-        )
+        other = PBUser.objects.create_user(email="other@example.com", password="SecurePass123!")
         other_ref = Corpus.objects.create(user=other, name="ref_arxiv")
         other_p = Profile.objects.create(user=other, name="OB", categories=["cs.LG"])
         other_run = RecommendationRun.objects.create(
@@ -251,23 +235,15 @@ class RecommendationsViewTests(_RecTestBase):
 
     def test_categories_json_unions_all_profiles(self):
         Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
-        Profile.objects.create(
-            user=self.user, name="B", categories=["cs.LG", "math.CO"]
-        )
-        cats = json.loads(
-            self.client.get("/recommendations/").context["categories_json"]
-        )
+        Profile.objects.create(user=self.user, name="B", categories=["cs.LG", "math.CO"])
+        cats = json.loads(self.client.get("/recommendations/").context["categories_json"])
         self.assertEqual(cats, ["cs.AI", "cs.LG", "math.CO"])
 
     def test_categories_json_scoped_to_selected_profile(self):
         pa = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
-        Profile.objects.create(
-            user=self.user, name="B", categories=["cs.LG", "math.CO"]
-        )
+        Profile.objects.create(user=self.user, name="B", categories=["cs.LG", "math.CO"])
         cats = json.loads(
-            self.client.get(f"/recommendations/?profile={pa.pk}").context[
-                "categories_json"
-            ]
+            self.client.get(f"/recommendations/?profile={pa.pk}").context["categories_json"]
         )
         self.assertEqual(cats, ["cs.AI"])
 
@@ -288,9 +264,7 @@ class RecommendationAddToProfileTests(_RecTestBase):
     def setUp(self):
         super().setUp()
         self.client.login(username="rec@example.com", password="SecurePass123!")
-        self.profile = Profile.objects.create(
-            user=self.user, name="A", categories=["cs.AI"]
-        )
+        self.profile = Profile.objects.create(user=self.user, name="A", categories=["cs.AI"])
 
     def _add(self, profile_id, paper_id):
         return self.client.post(
@@ -326,9 +300,7 @@ class RecommendationAddToProfileTests(_RecTestBase):
 
     def test_add_paper_not_recommended_to_user_404(self):
         # Paper recommended only to a different user -> not addable by this user.
-        other = PBUser.objects.create_user(
-            email="other@example.com", password="SecurePass123!"
-        )
+        other = PBUser.objects.create_user(email="other@example.com", password="SecurePass123!")
         other_ref = Corpus.objects.create(user=other, name="ref_arxiv")
         other_p = Profile.objects.create(user=other, name="OB", categories=["cs.LG"])
         other_run = RecommendationRun.objects.create(
@@ -353,9 +325,7 @@ class RecommendationAddToProfileTests(_RecTestBase):
     def test_add_other_users_profile_404(self):
         paper = _make_paper("2301.00001", "Rec Paper")
         self._recommend(paper)
-        other = PBUser.objects.create_user(
-            email="other2@example.com", password="SecurePass123!"
-        )
+        other = PBUser.objects.create_user(email="other2@example.com", password="SecurePass123!")
         other_p = Profile.objects.create(user=other, name="OP", categories=["cs.AI"])
         resp = self._add(other_p.pk, paper.pk)
         self.assertEqual(resp.status_code, 404)

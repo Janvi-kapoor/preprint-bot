@@ -1,5 +1,5 @@
 """
-Recover arXiv IDs for papers that have titles but missing arxiv_id values,
+Recover arXiv IDs for papers that have titles but missing source_id values,
 by searching the arXiv API by title.
 
 Usage:
@@ -14,14 +14,11 @@ from django.core.management.base import BaseCommand
 
 from core.models import Paper
 
-
-ARXIV_ID_RE = re.compile(
-    r"^(\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})$", re.IGNORECASE
-)
+ARXIV_ID_RE = re.compile(r"^(\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})$", re.IGNORECASE)
 
 
 def _search_arxiv_by_title(title):
-    """Search arXiv for a paper by exact title. Returns (arxiv_id, api_title) or (None, None)."""
+    """Search arXiv for a paper by exact title. Returns (source_id, api_title) or (None, None)."""
     try:
         import arxiv as arxiv_lib
     except ImportError:
@@ -29,7 +26,7 @@ def _search_arxiv_by_title(title):
 
     # Strip HTML tags and double quotes from title
     clean_title = re.sub(r"<[^>]+>", "", title).strip()
-    clean_title = clean_title.replace('"', '')
+    clean_title = clean_title.replace('"', "")
 
     client = arxiv_lib.Client()
     search = arxiv_lib.Search(
@@ -53,7 +50,7 @@ def _search_arxiv_by_title(title):
 
 
 class Command(BaseCommand):
-    help = "Recover arXiv IDs by searching arXiv API by title for papers with missing arxiv_id."
+    help = "Recover arXiv IDs by searching arXiv API by title for papers with missing source_id."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -73,7 +70,7 @@ class Command(BaseCommand):
 
         papers = list(
             Paper.objects.filter(
-                arxiv_id__isnull=True,
+                source_id__isnull=True,
                 source=source,
             )
             .exclude(title="")
@@ -84,7 +81,9 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS("No papers with missing arXiv IDs found."))
             return
 
-        self.stdout.write(f"Found {len(papers)} paper(s) with missing arXiv IDs (source={source}).\n")
+        self.stdout.write(
+            f"Found {len(papers)} paper(s) with missing arXiv IDs (source={source}).\n"
+        )
 
         recovered = 0
         not_found = 0
@@ -106,22 +105,26 @@ class Command(BaseCommand):
 
             if aid:
                 if apply:
-                    paper.arxiv_id = aid
-                    paper.save(update_fields=["arxiv_id"])
+                    paper.source_id = aid
+                    paper.save(update_fields=["source_id"])
                 mark = "+" if apply else "~"
                 self.stdout.write(self.style.SUCCESS(f"    {mark} Found: {aid}"))
                 recovered += 1
             else:
-                self.stdout.write(self.style.WARNING(f"    ? Not found on arXiv"))
+                self.stdout.write(self.style.WARNING("    ? Not found on arXiv"))
                 not_found += 1
 
         self.stdout.write("")
         if apply:
-            self.stdout.write(self.style.SUCCESS(
-                f"Recovered {recovered} arXiv ID(s). Not found: {not_found}. Failed: {failed}."
-            ))
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Recovered {recovered} arXiv ID(s). Not found: {not_found}. Failed: {failed}."
+                )
+            )
         else:
-            self.stdout.write(self.style.WARNING(
-                f"Dry run: would recover {recovered} arXiv ID(s). Not found: {not_found}. Failed: {failed}. "
-                f"Run with --apply to execute."
-            ))
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Dry run: would recover {recovered} arXiv ID(s). Not found: {not_found}. Failed: {failed}. "
+                    f"Run with --apply to execute."
+                )
+            )
