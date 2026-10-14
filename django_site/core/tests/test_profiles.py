@@ -1,7 +1,35 @@
 """Tests for profile create/read/update/delete."""
 
+from unittest.mock import patch
+
 from django.test import TestCase
 from core.models import PBUser, Profile
+
+
+class ProfileListSourceLabelTests(TestCase):
+    """Category source names follow the enabled-source count, not usage."""
+
+    def setUp(self):
+        self.user = PBUser.objects.create_user(
+            email="labels@example.com",
+            password="SecurePass123!",
+        )
+        self.client.login(username="labels@example.com", password="SecurePass123!")
+        Profile.objects.create(
+            user=self.user,
+            name="A",
+            source_categories={"arxiv": ["cs.AI"]},
+        )
+
+    def test_hidden_with_a_single_enabled_source(self):
+        resp = self.client.get("/profiles/")
+        self.assertFalse(resp.context["show_source_labels"])
+
+    def test_shown_with_several_enabled_even_if_profile_uses_one(self):
+        """The profile only tracks arXiv, but a bare code is still ambiguous."""
+        with patch("core.sources.enabled_names", return_value=["arxiv", "biorxiv"]):
+            resp = self.client.get("/profiles/")
+        self.assertTrue(resp.context["show_source_labels"])
 
 
 class ProfileCRUDTests(TestCase):
@@ -24,7 +52,7 @@ class ProfileCRUDTests(TestCase):
             "frequency": "weekly",
             "threshold": "0.6",
             "top_x": "25",
-            "categories": "cs.AI,cs.LG",
+            "categories": "arxiv:cs.AI,arxiv:cs.LG",
         }
         data.update(overrides)
         return data
@@ -39,7 +67,7 @@ class ProfileCRUDTests(TestCase):
     def test_create_profile_stores_categories(self):
         self.client.post("/profiles/create/", self._valid_profile_data())
         profile = Profile.objects.get(user=self.user, name="AI Research")
-        self.assertEqual(profile.categories, ["cs.AI", "cs.LG"])
+        self.assertEqual(profile.source_categories, {"arxiv": ["cs.AI", "cs.LG"]})
 
     def test_create_profile_stores_threshold(self):
         self.client.post(
@@ -88,6 +116,44 @@ class ProfileCRUDTests(TestCase):
         profile.refresh_from_db()
         self.assertEqual(profile.name, "Renamed")
 
+    def test_edit_keeps_selections_for_a_disabled_source(self):
+        """Codes for a source the deployment no longer enables must survive.
+
+        The picker can only render enabled sources, so those codes are absent
+        from the submitted form; dropping them would silently delete data.
+        """
+        self.client.post("/profiles/create/", self._valid_profile_data())
+        profile = Profile.objects.get(user=self.user)
+        profile.source_categories = {"arxiv": ["cs.AI"], "biorxiv": ["neuro"]}
+        profile.save()
+
+        resp = self.client.post(
+            f"/profiles/{profile.pk}/edit/",
+            self._valid_profile_data(categories="arxiv:cs.LG"),
+        )
+        self.assertEqual(resp.status_code, 302)
+        profile.refresh_from_db()
+        self.assertEqual(profile.source_categories, {"arxiv": ["cs.LG"], "biorxiv": ["neuro"]})
+
+    def test_edit_rerender_does_not_override_submitted_categories(self):
+        """A failed POST must not reseed the picker from the stored profile.
+
+        The bound form already holds what the user picked; handing the JS the
+        persisted selection instead would overwrite their edits.
+        """
+        self.client.post("/profiles/create/", self._valid_profile_data())
+        self.client.post("/profiles/create/", self._valid_profile_data(name="Other"))
+        profile = Profile.objects.get(user=self.user, name="Other")
+
+        # Renaming onto an existing name re-renders the bound form.
+        resp = self.client.post(
+            f"/profiles/{profile.pk}/edit/",
+            self._valid_profile_data(name="AI Research", categories="arxiv:stat.ML"),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["initial_categories"], [])
+        self.assertEqual(resp.context["form"]["categories"].value(), "arxiv:stat.ML")
+
     def test_edit_preserves_other_fields(self):
         self.client.post(
             "/profiles/create/",
@@ -116,7 +182,7 @@ class ProfileCRUDTests(TestCase):
         profile = Profile.objects.create(
             user=self.other_user,
             name="Other",
-            categories=["cs.AI"],
+            source_categories={"arxiv": ["cs.AI"]},
         )
         resp = self.client.post(
             f"/profiles/{profile.pk}/edit/",
@@ -128,7 +194,7 @@ class ProfileCRUDTests(TestCase):
         profile = Profile.objects.create(
             user=self.other_user,
             name="Other",
-            categories=["cs.AI"],
+            source_categories={"arxiv": ["cs.AI"]},
         )
         resp = self.client.post(f"/profiles/{profile.pk}/delete/")
         self.assertEqual(resp.status_code, 404)
