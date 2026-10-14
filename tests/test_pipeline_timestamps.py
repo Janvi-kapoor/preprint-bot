@@ -21,4 +21,3 @@ class TestPipelineDurationFormatting:
     )
     def test_format_duration(self, seconds, expected):
         assert _format_duration(seconds) == expected
-

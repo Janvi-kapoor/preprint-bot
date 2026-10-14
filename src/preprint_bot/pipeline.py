@@ -281,7 +281,9 @@ async def _parse_and_store_sections(
         except Exception as e:
             print(f"  Failed to process {paper.get('source_id', paper['id'])}: {e}")
 
-    print(f"Parsed {parsed} papers, stored sections to database (completed in {_format_duration(time.time() - parse_start)})")
+    print(
+        f"Parsed {parsed} papers, stored sections to database (completed in {_format_duration(time.time() - parse_start)})"
+    )
 
 
 async def summarize_papers(
@@ -547,11 +549,15 @@ async def run_pipeline(args):
         user_result = await process_unprocessed_papers(
             api_client, skip_parse=args.skip_parse, skip_embed=args.skip_embed
         )
-        print(f"  Summary: {user_result['parsed']} parsed, {user_result['embedded']} embedded (completed in {_format_duration(time.time() - step1_start)})")
+        print(
+            f"  Summary: {user_result['parsed']} parsed, {user_result['embedded']} embedded (completed in {_format_duration(time.time() - step1_start)})"
+        )
 
         print("\n" + "=" * 60)
         step2_start = time.time()
-        print(f"STEP 2: Getting Categories from User Profiles [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
+        print(
+            f"STEP 2: Getting Categories from User Profiles [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
+        )
         print("=" * 60)
         categories_by_source = await get_all_profile_categories(api_client)
         print(f"  Retrieved categories in {_format_duration(time.time() - step2_start)}")
@@ -582,7 +588,9 @@ async def run_pipeline(args):
         if not entries:
             print("No new papers fetched. Skipping steps 4–7.")
         else:
-            print(f"Fetched {len(entries)} papers (completed in {_format_duration(time.time() - step3_start)})")
+            print(
+                f"Fetched {len(entries)} papers (completed in {_format_duration(time.time() - step3_start)})"
+            )
 
             corpus_id, paper_ids, new_paper_ids, stored_count = await store_fetched_papers(
                 api_client,
@@ -623,13 +631,17 @@ async def run_pipeline(args):
                         await summarize_papers(
                             api_client, corpus_id, summarizer, entries, mode="abstract"
                         )
-                        print(f"  Summarization completed in {_format_duration(time.time() - step5_start)}")
+                        print(
+                            f"  Summarization completed in {_format_duration(time.time() - step5_start)}"
+                        )
                 else:
                     summarizer = TransformerSummarizer()
                     await summarize_papers(
                         api_client, corpus_id, summarizer, entries, mode="abstract"
                     )
-                    print(f"  Summarization completed in {_format_duration(time.time() - step5_start)}")
+                    print(
+                        f"  Summarization completed in {_format_duration(time.time() - step5_start)}"
+                    )
             elif stored_count == 0:
                 print("No new papers — skipping.")
             else:
@@ -664,7 +676,9 @@ async def run_pipeline(args):
 
             print("\n" + "=" * 60)
             step6_start = time.time()
-            print(f"STEP 6: Generating Recommendations [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
+            print(
+                f"STEP 6: Generating Recommendations [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
+            )
             print("=" * 60)
             await generate_recommendations(
                 api_client, corpus_id, user_corpora, target_date, paper_ids=paper_ids
