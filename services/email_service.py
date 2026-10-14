@@ -75,7 +75,7 @@ def build_digest_html(
         authors = format_authors(paper.get("authors") or [])
         summary = paper.get("summary_text") or paper.get("summary") or paper.get("abstract", "")
         # Papers with no public landing page point back at the dashboard
-        arxiv_url = paper.get("landing_url") or RECOMMENDATIONS_URL
+        paper_url = paper_landing_url(paper) or paper.get("landing_url") or RECOMMENDATIONS_URL
 
         truncated_summary, was_truncated = truncate_to_sentences(summary, 3)
         read_more = (
