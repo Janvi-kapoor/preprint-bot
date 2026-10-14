@@ -24,7 +24,11 @@ if not DEBUG and SECRET_KEY == _INSECURE_KEY:
         "Generate one with: python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'"
     )
 
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+]
 
 # ---------------------------------------------------------------------------
 # Application definition
@@ -125,7 +129,7 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 # PDF storage paths (mirrors FastAPI config)
 PDF_DATA_DIR = Path(os.getenv("PDF_DATA_DIR", BASE_DIR.parent / "pdf_data"))
-USER_PDF_DIR = PDF_DATA_DIR / "user_pdfs"          # legacy — used by FastAPI pipeline only
+USER_PDF_DIR = PDF_DATA_DIR / "user_pdfs"  # legacy — used by FastAPI pipeline only
 USER_PROCESSED_DIR = PDF_DATA_DIR / "user_processed"  # legacy — used by FastAPI pipeline only
 PAPER_STORAGE_DIR = PDF_DATA_DIR / "papers"  # hash-based deduplicated storage
 
@@ -149,15 +153,31 @@ SITE_NAME = os.getenv("SITE_NAME", "Preprint Bot")
 SHOW_BETA_BANNER = os.getenv("SHOW_BETA_BANNER", "True").lower() in ("true", "1", "yes")
 
 # ---------------------------------------------------------------------------
-# arXiv search settings
+# Optional font-family override; empty keeps the default font
+# ---------------------------------------------------------------------------
+FONT_FAMILY = ""
+
+# ---------------------------------------------------------------------------
+# Preprint source search settings
 # ---------------------------------------------------------------------------
 
-ARXIV_SEARCH_MAX_RESULTS = int(os.getenv("ARXIV_SEARCH_MAX_RESULTS", 500))
-ARXIV_SEARCH_PER_PAGE = int(os.getenv("ARXIV_SEARCH_PER_PAGE", 50))
+# Applied to whichever source the user is searching. The ARXIV_SEARCH_* names
+# predate multi-source support and are still read so existing deployments do
+# not need their environment changed.
+SOURCE_SEARCH_MAX_RESULTS = int(
+    os.getenv("SOURCE_SEARCH_MAX_RESULTS", os.getenv("ARXIV_SEARCH_MAX_RESULTS", 500))
+)
+SOURCE_SEARCH_PER_PAGE = int(
+    os.getenv("SOURCE_SEARCH_PER_PAGE", os.getenv("ARXIV_SEARCH_PER_PAGE", 50))
+)
 ACCENT_COLOR = os.getenv("ACCENT_COLOR", "")  # e.g. "#e65100" — overrides the default blue
 NAV_COLOR = os.getenv("NAV_COLOR", "")  # e.g. "#1b5e20" — overrides the dark navbar
 REGISTRATION_OPEN = os.getenv("REGISTRATION_OPEN", "True").lower() in ("true", "1", "yes")
-REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "False").lower() in ("true", "1", "yes")
+REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "False").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 # ---------------------------------------------------------------------------
 # ORCID OAuth2 (optional — leave ORCID_CLIENT_ID blank to disable)
@@ -185,7 +205,9 @@ if os.getenv("EMAIL_HOST"):
     DEFAULT_FROM_EMAIL = f"{_from_name} <{_from_addr}>"
 else:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
-    DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", f"noreply@{os.getenv('SITE_DOMAIN', 'localhost')}")
+    DEFAULT_FROM_EMAIL = os.getenv(
+        "DEFAULT_FROM_EMAIL", f"noreply@{os.getenv('SITE_DOMAIN', 'localhost')}"
+    )
 
 # ---------------------------------------------------------------------------
 # Local overrides (not committed to version control)

@@ -12,12 +12,15 @@ class OnboardingTests(TestCase):
     def setUp(self):
         # Registering auto-logs-in under the default (no email verification),
         # setting the onboarding session flag.
-        self.client.post("/auth/register/", {
-            "email": "newbie@example.com",
-            "name": "Newbie",
-            "password": "GoodPassword99!",
-            "confirm_password": "GoodPassword99!",
-        })
+        self.client.post(
+            "/auth/register/",
+            {
+                "email": "newbie@example.com",
+                "name": "Newbie",
+                "password": "GoodPassword99!",
+                "confirm_password": "GoodPassword99!",
+            },
+        )
         self.user = PBUser.objects.get(email="newbie@example.com")
 
     def _add_paper(self, profile):
@@ -38,7 +41,9 @@ class OnboardingTests(TestCase):
         self.assertEqual(resp.url, "/onboarding/profile/")
 
     def test_gate_resumes_at_papers_when_profile_exists(self):
-        profile = Profile.objects.create(user=self.user, name="P1", categories=["cs.AI"])
+        profile = Profile.objects.create(
+            user=self.user, name="P1", source_categories={"arxiv": ["cs.AI"]}
+        )
         resp = self.client.get("/")
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.url, f"/onboarding/papers/{profile.pk}/")
@@ -59,16 +64,22 @@ class OnboardingTests(TestCase):
     # ── Finish ────────────────────────────────────────────
 
     def test_finish_requires_at_least_one_paper(self):
-        profile = Profile.objects.create(user=self.user, name="P1", categories=["cs.AI"])
+        profile = Profile.objects.create(
+            user=self.user, name="P1", source_categories={"arxiv": ["cs.AI"]}
+        )
         resp = self.client.post("/onboarding/finish/", {"profile_id": profile.pk})
         # No papers → bounced back to the papers step, onboarding still active.
         self.assertRedirects(
-            resp, f"/onboarding/papers/{profile.pk}/", fetch_redirect_response=False,
+            resp,
+            f"/onboarding/papers/{profile.pk}/",
+            fetch_redirect_response=False,
         )
         self.assertEqual(self.client.get("/").status_code, 302)
 
     def test_finish_with_paper_ends_onboarding(self):
-        profile = Profile.objects.create(user=self.user, name="P1", categories=["cs.AI"])
+        profile = Profile.objects.create(
+            user=self.user, name="P1", source_categories={"arxiv": ["cs.AI"]}
+        )
         self._add_paper(profile)
         resp = self.client.post("/onboarding/finish/", {"profile_id": profile.pk})
         self.assertRedirects(resp, "/", fetch_redirect_response=False)
@@ -80,10 +91,13 @@ class OnboardingTests(TestCase):
     def test_no_retrigger_on_second_login(self):
         self.client.post("/auth/logout/")
         # last_login was set on the first login, so a second login won't re-flag.
-        self.client.post("/auth/login/", {
-            "email": "newbie@example.com",
-            "password": "GoodPassword99!",
-        })
+        self.client.post(
+            "/auth/login/",
+            {
+                "email": "newbie@example.com",
+                "password": "GoodPassword99!",
+            },
+        )
         self.assertEqual(self.client.get("/").status_code, 200)
 
 
@@ -93,7 +107,8 @@ class ReturningUserNavigationTests(TestCase):
 
     def setUp(self):
         self.user = PBUser.objects.create_user(
-            email="returning@example.com", password="SecurePass123!",
+            email="returning@example.com",
+            password="SecurePass123!",
         )
         self.client.login(username="returning@example.com", password="SecurePass123!")
 

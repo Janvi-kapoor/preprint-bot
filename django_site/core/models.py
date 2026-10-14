@@ -17,8 +17,10 @@ from pgvector.django import VectorField
 
 from preprint_sources import all_source_names, get_source
 
+from .sources import source_label as _source_label
 
 # ── Users ──────────────────────────────────────────────────────────────────
+
 
 class PBUserManager(BaseUserManager):
     """Manager for email-based authentication (no username)."""
@@ -57,7 +59,7 @@ class PBUser(AbstractBaseUser, PermissionsMixin):
     objects = PBUserManager()
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = []           # email is already required by USERNAME_FIELD
+    REQUIRED_FIELDS = []  # email is already required by USERNAME_FIELD
 
     class Meta:
         db_table = "users"
@@ -79,6 +81,7 @@ class PBUser(AbstractBaseUser, PermissionsMixin):
 
 # ── Profiles ───────────────────────────────────────────────────────────────
 
+
 class Profile(models.Model):
     """User research profiles and preferences."""
 
@@ -91,7 +94,8 @@ class Profile(models.Model):
     user = models.ForeignKey(PBUser, on_delete=models.CASCADE, related_name="profiles")
     name = models.CharField(max_length=255)
     keywords = ArrayField(models.TextField(), default=list, blank=True)
-    categories = ArrayField(models.TextField(), default=list, blank=True)
+    # {source_name: [leaf category codes]}
+    source_categories = models.JSONField(default=dict, blank=True)
     email_notify = models.BooleanField(default=True)
     frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default="daily")
     threshold = models.FloatField(default=0.6)
@@ -107,7 +111,8 @@ class Profile(models.Model):
                 name="profiles_user_name_unique",
             ),
             models.UniqueConstraint(
-                Lower("name"), "user",
+                Lower("name"),
+                "user",
                 name="profiles_user_name_ci_unique",
             ),
         ]
@@ -115,8 +120,39 @@ class Profile(models.Model):
     def __str__(self):
         return f"{self.name} ({self.user})"
 
+    @property
+    def categories_by_source(self):
+        """``source_categories`` as a plain dict, tolerating legacy rows."""
+        raw = self.source_categories
+        if isinstance(raw, dict):
+            return {k: list(v or []) for k, v in raw.items()}
+        # Handle rows written before the per-source migration which may still
+        # hold a flat list of arXiv categories.
+        if isinstance(raw, list):
+            return {"arxiv": list(raw)} if raw else {}
+        return {}
+
+    @property
+    def category_codes(self):
+        """Category codes across sources, deduplicated, in source order.
+
+        For displays and filters that do not care which server a code came
+        from. Anything source-sensitive should use ``categories_by_source``.
+        """
+        codes = []
+        for source_codes in self.categories_by_source.values():
+            for code in source_codes:
+                if code not in codes:
+                    codes.append(code)
+        return codes
+
+    def categories_for(self, source_name):
+        """Codes selected for one source, or an empty list."""
+        return self.categories_by_source.get(source_name, [])
+
 
 # ── Corpora ────────────────────────────────────────────────────────────────
+
 
 class Corpus(models.Model):
     """Collections of papers (arXiv corpus or user collections)."""
@@ -138,6 +174,7 @@ class Corpus(models.Model):
 
 # ── Profile ↔ Corpus junction ─────────────────────────────────────────────
 
+
 class ProfileCorpus(models.Model):
     profile = models.ForeignKey(Profile, on_delete=models.CASCADE)
     corpus = models.ForeignKey(Corpus, on_delete=models.CASCADE)
@@ -149,6 +186,7 @@ class ProfileCorpus(models.Model):
 
 
 # ── Papers ─────────────────────────────────────────────────────────────────
+
 
 class Paper(models.Model):
     """Academic papers from arXiv or user uploads.
@@ -165,12 +203,15 @@ class Paper(models.Model):
 
     # Legacy FK — no longer populated or queried; kept for schema compat
     corpus = models.ForeignKey(
-        Corpus, on_delete=models.SET_NULL, blank=True, null=True,
+        Corpus,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
         related_name="papers_legacy",
         help_text="Deprecated — not populated. Use corpora M2M. Can be dropped in a future migration.",
     )
     corpora = models.ManyToManyField(Corpus, blank=True, related_name="papers")
-    arxiv_id = models.CharField(max_length=50, blank=True, null=True)
+    source_id = models.CharField(max_length=50, blank=True, null=True)
     sha256 = models.CharField(max_length=64, unique=True, blank=True, null=True)
     title = models.TextField()
     abstract = models.TextField(blank=True, null=True)
@@ -185,7 +226,7 @@ class Paper(models.Model):
     class Meta:
         db_table = "papers"
         indexes = [
-            models.Index(fields=["arxiv_id"], name="papers_arxiv_id_idx"),
+            models.Index(fields=["source_id"], name="papers_source_id_idx"),
             models.Index(fields=["submitted_date"], name="papers_submitted_date_idx"),
         ]
 
@@ -193,17 +234,16 @@ class Paper(models.Model):
         return self.title[:80]
 
     @property
-    def arxiv_url(self):
-        if self.arxiv_id:
-            return f"https://arxiv.org/abs/{self.arxiv_id}"
-        return ""
-
-    @property
     def landing_url(self):
         """Source-aware abstract/landing page URL (empty for uploads)."""
-        if not self.arxiv_id or self.source not in all_source_names():
+        if not self.source_id or self.source not in all_source_names():
             return ""
-        return get_source(self.source).landing_url(self.arxiv_id)
+        return get_source(self.source).landing_url(self.source_id)
+
+    @property
+    def source_label(self):
+        """Human-facing source name for UI badges, e.g. ``arXiv``."""
+        return _source_label(self.source)
 
     @property
     def categories_list(self):
@@ -231,6 +271,7 @@ class Paper(models.Model):
 
 # ── Sections ───────────────────────────────────────────────────────────────
 
+
 class Section(models.Model):
     paper = models.ForeignKey(Paper, on_delete=models.CASCADE, related_name="sections")
     section_header = models.TextField(blank=True, null=True)
@@ -243,6 +284,7 @@ class Section(models.Model):
 
 
 # ── Summaries ──────────────────────────────────────────────────────────────
+
 
 class Summary(models.Model):
     MODE_CHOICES = [("abstract", "Abstract"), ("full", "Full")]
@@ -260,6 +302,7 @@ class Summary(models.Model):
 
 
 # ── Embeddings ─────────────────────────────────────────────────────────────
+
 
 class Embedding(models.Model):
     """Vector embeddings for semantic similarity search.
@@ -295,6 +338,7 @@ class Embedding(models.Model):
 
 # ── Processing runs ────────────────────────────────────────────────────────
 
+
 class ProcessingRun(models.Model):
     run_type = models.CharField(max_length=50)
     category = models.CharField(max_length=50, blank=True, null=True)
@@ -309,6 +353,7 @@ class ProcessingRun(models.Model):
 
 
 # ── Recommendation runs ───────────────────────────────────────────────────
+
 
 class RecommendationRun(models.Model):
     profile = models.ForeignKey(
@@ -329,6 +374,7 @@ class RecommendationRun(models.Model):
 
 
 # ── Recommendations ────────────────────────────────────────────────────────
+
 
 class Recommendation(models.Model):
     run = models.ForeignKey(
@@ -359,6 +405,7 @@ class Recommendation(models.Model):
 
 # ── Profile ↔ Recommendation junction ─────────────────────────────────────
 
+
 class ProfileRecommendation(models.Model):
     profile = models.ForeignKey(Profile, on_delete=models.CASCADE)
     recommendation = models.ForeignKey(Recommendation, on_delete=models.CASCADE)
@@ -371,6 +418,7 @@ class ProfileRecommendation(models.Model):
 
 # ── Auth tokens ────────────────────────────────────────────────────────────
 
+
 class AuthToken(models.Model):
     user = models.ForeignKey(PBUser, on_delete=models.CASCADE, related_name="auth_tokens")
     token_hash = models.CharField(max_length=64, unique=True)
@@ -382,6 +430,7 @@ class AuthToken(models.Model):
 
 
 # ── Email logs ─────────────────────────────────────────────────────────────
+
 
 class EmailLog(models.Model):
     STATUS_CHOICES = [("sent", "Sent"), ("failed", "Failed")]
@@ -398,6 +447,7 @@ class EmailLog(models.Model):
 
 
 # ── ArXiv daily stats ─────────────────────────────────────────────────────
+
 
 class ArxivDailyStats(models.Model):
     submission_date = models.DateField()

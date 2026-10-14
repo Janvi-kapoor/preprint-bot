@@ -21,10 +21,10 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
-from preprint_sources.taxonomies.arxiv import ARXIV_CODE_TO_LABEL, ARXIV_CATEGORY_TREE, label_for
 from .auth_backend import (
     authenticate_pbuser,
     login_pbuser,
@@ -50,17 +50,48 @@ from .models import (
     RecommendationRun,
     Summary,
 )
-
-ARXIV_ID_RE = re.compile(
-    r"^(\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})$", re.IGNORECASE
+from .sources import (
+    category_label,
+    category_trees,
+    code_to_label_by_source,
+    multiple_sources_enabled,
+    order_source_names,
+    paper_source_context,
+    preserve_disabled_selections,
+    resolve_source,
+    run_sync,
+    source_label,
 )
+
+# Users paste several ids at once, comma- or newline-separated; the
+# shape of each id is the source's business, not this module's.
+SOURCE_ID_SEPARATOR_RE = re.compile(r"[,\n]+")
+
+
+def _category_tokens(profile):
+    """A profile's selections in the picker's "source:code" wire format."""
+    return [
+        f"{source_name}:{code}"
+        for source_name, codes in profile.categories_by_source.items()
+        for code in codes
+    ]
+
+
+def _category_picker_context(profile=None):
+    """Context the category picker needs: the trees, plus any selection."""
+    return {
+        "category_sources": category_trees(),
+        "initial_categories": _category_tokens(profile) if profile else [],
+    }
 
 
 # ── Paper storage helpers ──────────────────────────────────────────────────
 
+
 def _compute_sha256(source):
     """Compute SHA-256 hash of a file path, bytes, or Django UploadedFile."""
     import hashlib
+
     h = hashlib.sha256()
     if isinstance(source, bytes):
         h.update(source)
@@ -164,10 +195,16 @@ def _pdf_has_text_layer(uploaded_file, min_chars=50, max_pages=3):
 # paper-action endpoints its papers screen reuses). Everything else GETs
 # bounced back into the flow.
 _ONBOARDING_EXEMPT = {
-    "onboarding_profile", "onboarding_papers", "onboarding_finish",
-    "onboarding_skip", "logout",
-    "paper_upload", "paper_add_arxiv", "paper_search_arxiv_api",
-    "paper_view", "paper_delete",
+    "onboarding_profile",
+    "onboarding_papers",
+    "onboarding_finish",
+    "onboarding_skip",
+    "logout",
+    "paper_upload",
+    "paper_add_by_id",
+    "paper_search_api",
+    "paper_view",
+    "paper_delete",
 }
 
 
@@ -240,6 +277,7 @@ def _send_verification_email(request, pb_user):
 
 # ── Auth views ─────────────────────────────────────────────────────────────
 
+
 def login_view(request):
     if request.user.is_authenticated:
         return redirect("dashboard")
@@ -256,9 +294,15 @@ def login_view(request):
             if django_settings.REQUIRE_EMAIL_VERIFICATION and not pb_user.email_verified:
                 request.session["resend_verification_email"] = pb_user.email
                 messages.error(request, "Please verify your email before signing in.")
-                return render(request, "auth/login.html", {
-                    "form": form, "next": next_url, "show_resend_link": True,
-                })
+                return render(
+                    request,
+                    "auth/login.html",
+                    {
+                        "form": form,
+                        "next": next_url,
+                        "show_resend_link": True,
+                    },
+                )
             login_pbuser(request, pb_user)
             # Validate next URL to prevent open redirect and HTTPS downgrade
             if next_url and url_has_allowed_host_and_scheme(
@@ -291,6 +335,7 @@ def register_view(request):
             messages.error(request, "An account with that email already exists.")
         else:
             from django.db import IntegrityError
+
             try:
                 pb_user = PBUser.objects.create_user(
                     email=email,
@@ -303,10 +348,14 @@ def register_view(request):
 
             if django_settings.REQUIRE_EMAIL_VERIFICATION:
                 verify_url = _send_verification_email(request, pb_user)
-                return render(request, "auth/verify_email_sent.html", {
-                    "email": pb_user.email,
-                    "verify_url": verify_url if django_settings.DEBUG else None,
-                })
+                return render(
+                    request,
+                    "auth/verify_email_sent.html",
+                    {
+                        "email": pb_user.email,
+                        "verify_url": verify_url if django_settings.DEBUG else None,
+                    },
+                )
 
             # No verification required — log in immediately
             login_pbuser(request, pb_user)
@@ -361,13 +410,18 @@ def resend_verification_view(request):
         return redirect("login")
 
     verify_url = _send_verification_email(request, pb_user)
-    return render(request, "auth/verify_email_sent.html", {
-        "email": pb_user.email,
-        "verify_url": verify_url if django_settings.DEBUG else None,
-    })
+    return render(
+        request,
+        "auth/verify_email_sent.html",
+        {
+            "email": pb_user.email,
+            "verify_url": verify_url if django_settings.DEBUG else None,
+        },
+    )
 
 
 # ── ORCID OAuth2 ──────────────────────────────────────────────────────────
+
 
 def orcid_login_view(request):
     """Redirect the user to ORCID's OAuth2 authorization page."""
@@ -379,6 +433,7 @@ def orcid_login_view(request):
 
     # Generate a random state token to prevent CSRF
     import secrets
+
     state = secrets.token_urlsafe(32)
     request.session["orcid_oauth_state"] = state
 
@@ -504,6 +559,7 @@ def orcid_complete_view(request):
             )
         else:
             from django.db import IntegrityError
+
             try:
                 pb_user = PBUser.objects.create_user(
                     email=email,
@@ -517,20 +573,30 @@ def orcid_complete_view(request):
                     "An account with that email already exists. "
                     "Sign in with your password to link your ORCID later.",
                 )
-                return render(request, "auth/orcid_complete.html", {
-                    "form": form, "orcid_id": orcid_id, "orcid_name": orcid_name,
-                })
+                return render(
+                    request,
+                    "auth/orcid_complete.html",
+                    {
+                        "form": form,
+                        "orcid_id": orcid_id,
+                        "orcid_name": orcid_name,
+                    },
+                )
             # Clear pending session data
             del request.session["orcid_pending"]
             login_pbuser(request, pb_user)
             messages.success(request, f"Account created with ORCID ({orcid_id}).")
             return redirect("dashboard")
 
-    return render(request, "auth/orcid_complete.html", {
-        "form": form,
-        "orcid_id": orcid_id,
-        "orcid_name": orcid_name,
-    })
+    return render(
+        request,
+        "auth/orcid_complete.html",
+        {
+            "form": form,
+            "orcid_id": orcid_id,
+            "orcid_name": orcid_name,
+        },
+    )
 
 
 @pbuser_required
@@ -548,6 +614,7 @@ def orcid_link_view(request):
 
     # Flag this OAuth flow as a link (not login/register)
     import secrets
+
     state = secrets.token_urlsafe(32)
     request.session["orcid_oauth_state"] = state
     request.session["orcid_link_mode"] = True
@@ -591,6 +658,7 @@ def forgot_password_view(request):
 
             # Send the reset link via email
             from django.core.mail import send_mail
+
             send_mail(
                 subject=f"Password reset – {django_settings.SITE_NAME}",
                 message=(
@@ -612,9 +680,7 @@ def forgot_password_view(request):
             pass  # don't reveal whether the email exists
         messages.success(request, "If that email exists, a reset link has been generated.")
 
-    return render(
-        request, "auth/forgot_password.html", {"form": form, "reset_link": reset_link}
-    )
+    return render(request, "auth/forgot_password.html", {"form": form, "reset_link": reset_link})
 
 
 def reset_password_view(request, uidb64, token):
@@ -642,6 +708,7 @@ def reset_password_view(request, uidb64, token):
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────────
+
 
 def home_view(request):
     """Root: public landing page for anonymous visitors, dashboard for
@@ -696,15 +763,14 @@ def dashboard_view(request):
 
 # ── Profiles ───────────────────────────────────────────────────────────────
 
+
 @pbuser_required
 def profile_list_view(request):
     pb_user = request.pb_user
     profiles = Profile.objects.filter(user=pb_user).order_by("-created_at")
 
     # Prefetch all user corpora
-    user_corpora = {
-        c.name: c for c in Corpus.objects.filter(user=pb_user)
-    }
+    user_corpora = {c.name: c for c in Corpus.objects.filter(user=pb_user)}
 
     profile_data = []
     for profile in profiles:
@@ -713,26 +779,37 @@ def profile_list_view(request):
 
         # Get papers linked to this profile's corpus via M2M
         if corpus:
-            papers = list(
-                Paper.objects.filter(corpora=corpus)
-                .order_by("-created_at")
-            )
+            papers = list(Paper.objects.filter(corpora=corpus).order_by("-created_at"))
         else:
             papers = []
 
-        profile_data.append({
-            "profile": profile,
-            "paper_count": len(papers),
-            "papers": papers,
-            "categories_display": [label_for(c) for c in (profile.categories or [])],
-        })
+        profile_data.append(
+            {
+                "profile": profile,
+                "paper_count": len(papers),
+                "papers": papers,
+                "categories_display": [
+                    {
+                        "source": source_label(source_name),
+                        "labels": [category_label(source_name, c) for c in codes],
+                    }
+                    for source_name, codes in profile.categories_by_source.items()
+                    if codes
+                ],
+            }
+        )
 
-    return render(request, "profiles/list.html", {
-        "pb_user": pb_user,
-        "profile_data": profile_data,
-        "code_to_label": ARXIV_CODE_TO_LABEL,
-        "arxiv_search_per_page": django_settings.ARXIV_SEARCH_PER_PAGE,
-    })
+    return render(
+        request,
+        "profiles/list.html",
+        {
+            "pb_user": pb_user,
+            "profile_data": profile_data,
+            "search_per_page": django_settings.SOURCE_SEARCH_PER_PAGE,
+            "show_source_labels": multiple_sources_enabled(),
+            **paper_source_context(),
+        },
+    )
 
 
 @pbuser_required
@@ -750,7 +827,7 @@ def profile_create_view(request):
                 Profile.objects.create(
                     user=pb_user,
                     name=name,
-                    categories=form.cleaned_data["categories"],
+                    source_categories=form.cleaned_data["categories"],
                     frequency=form.cleaned_data["frequency"],
                     threshold=form.cleaned_data["threshold"],
                     top_x=form.cleaned_data["top_x"],
@@ -760,11 +837,15 @@ def profile_create_view(request):
     else:
         form = ProfileForm()
 
-    return render(request, "profiles/create.html", {
-        "pb_user": pb_user,
-        "form": form,
-        "category_tree_json": json.dumps(ARXIV_CATEGORY_TREE),
-    })
+    return render(
+        request,
+        "profiles/create.html",
+        {
+            "pb_user": pb_user,
+            "form": form,
+            **_category_picker_context(),
+        },
+    )
 
 
 @pbuser_required
@@ -781,7 +862,11 @@ def profile_edit_view(request, profile_id):
                 messages.error(request, f"A profile named '{name}' already exists.")
             else:
                 profile.name = name
-                profile.categories = form.cleaned_data["categories"]
+                # Keep any codes for sources this deployment no longer
+                # enables (the picker cannot render them to be re-selected).
+                profile.source_categories = preserve_disabled_selections(
+                    profile.categories_by_source, form.cleaned_data["categories"]
+                )
                 profile.frequency = form.cleaned_data["frequency"]
                 profile.threshold = form.cleaned_data["threshold"]
                 profile.top_x = form.cleaned_data["top_x"]
@@ -789,22 +874,31 @@ def profile_edit_view(request, profile_id):
                 messages.success(request, f"Profile '{name}' updated.")
                 return redirect("profile_list")
     else:
-        form = ProfileForm(initial={
-            "name": profile.name,
-            "frequency": profile.frequency,
-            "threshold": max(0.40, min(0.75, profile.threshold if profile.threshold is not None else 0.6)),
-            "top_x": profile.top_x or 10,
-            "categories": ",".join(profile.categories or []),
-        })
+        form = ProfileForm(
+            initial={
+                "name": profile.name,
+                "frequency": profile.frequency,
+                "threshold": max(
+                    0.40, min(0.75, profile.threshold if profile.threshold is not None else 0.6)
+                ),
+                "top_x": profile.top_x or 10,
+                "categories": ",".join(_category_tokens(profile)),
+            }
+        )
 
-    return render(request, "profiles/create.html", {
-        "pb_user": pb_user,
-        "form": form,
-        "editing": True,
-        "profile": profile,
-        "category_tree_json": json.dumps(ARXIV_CATEGORY_TREE),
-        "initial_categories_json": json.dumps(profile.categories or []),
-    })
+    return render(
+        request,
+        "profiles/create.html",
+        {
+            "pb_user": pb_user,
+            "form": form,
+            "editing": True,
+            "profile": profile,
+            # On a re-rendered POST the bound form already holds the user's
+            # submission.
+            **_category_picker_context(None if request.method == "POST" else profile),
+        },
+    )
 
 
 @pbuser_required
@@ -820,11 +914,13 @@ def profile_delete_view(request, profile_id):
 
 # ── Onboarding (first-login walkthrough) ──────────────────────────────────
 
+
 def _safe_next(request, default_url_name):
     """Return a caller-supplied ``next`` path when it's a safe local URL,
     otherwise the reversed default. Lets shared endpoints return into the
     onboarding flow without changing their normal behaviour."""
     from django.utils.http import url_has_allowed_host_and_scheme
+
     nxt = request.POST.get("next") or request.GET.get("next")
     if nxt and url_has_allowed_host_and_scheme(
         nxt, allowed_hosts={request.get_host()}, require_https=request.is_secure()
@@ -848,7 +944,7 @@ def onboarding_profile_view(request):
                 profile = Profile.objects.create(
                     user=pb_user,
                     name=name,
-                    categories=form.cleaned_data["categories"],
+                    source_categories=form.cleaned_data["categories"],
                     frequency=form.cleaned_data["frequency"],
                     threshold=form.cleaned_data["threshold"],
                     top_x=form.cleaned_data["top_x"],
@@ -857,11 +953,15 @@ def onboarding_profile_view(request):
     else:
         form = ProfileForm()
 
-    return render(request, "onboarding/profile.html", {
-        "pb_user": pb_user,
-        "form": form,
-        "category_tree_json": json.dumps(ARXIV_CATEGORY_TREE),
-    })
+    return render(
+        request,
+        "onboarding/profile.html",
+        {
+            "pb_user": pb_user,
+            "form": form,
+            **_category_picker_context(),
+        },
+    )
 
 
 @pbuser_required
@@ -872,19 +972,19 @@ def onboarding_papers_view(request, profile_id):
 
     corpus_name = f"user_{pb_user.pk}_profile_{profile.pk}"
     corpus = Corpus.objects.filter(user=pb_user, name=corpus_name).first()
-    papers = (
-        list(Paper.objects.filter(corpora=corpus).order_by("-created_at"))
-        if corpus else []
-    )
+    papers = list(Paper.objects.filter(corpora=corpus).order_by("-created_at")) if corpus else []
 
-    return render(request, "onboarding/papers.html", {
-        "pb_user": pb_user,
-        "profile": profile,
-        "papers": papers,
-        "category_tree_json": json.dumps(ARXIV_CATEGORY_TREE),
-        "code_to_label": ARXIV_CODE_TO_LABEL,
-        "arxiv_search_per_page": django_settings.ARXIV_SEARCH_PER_PAGE,
-    })
+    return render(
+        request,
+        "onboarding/papers.html",
+        {
+            "pb_user": pb_user,
+            "profile": profile,
+            "papers": papers,
+            "search_per_page": django_settings.SOURCE_SEARCH_PER_PAGE,
+            **paper_source_context(),
+        },
+    )
 
 
 @pbuser_required
@@ -915,6 +1015,7 @@ def onboarding_skip_view(request):
 
 
 # ── Paper uploads (within a profile) ──────────────────────────────────────
+
 
 @pbuser_required
 @require_POST
@@ -969,6 +1070,7 @@ def paper_upload_view(request, profile_id):
         # New paper — store file and create DB row
         dest = _store_paper_upload(file_hash, f)
         from django.db import IntegrityError
+
         try:
             paper = Paper.objects.create(
                 title=Path(safe_name).stem,  # use filename as placeholder title
@@ -1009,7 +1111,9 @@ def paper_delete_view(request, profile_id, paper_id):
         messages.success(request, f"Removed '{paper.title[:60]}' from this profile.")
     else:
         if is_ajax:
-            return JsonResponse({"ok": False, "error": "Paper not linked to this profile."}, status=400)
+            return JsonResponse(
+                {"ok": False, "error": "Paper not linked to this profile."}, status=400
+            )
         messages.error(request, "Paper not linked to this profile.")
 
     return redirect(_safe_next(request, "profile_list"))
@@ -1039,116 +1143,110 @@ def paper_view(request, profile_id, paper_id):
 
 @pbuser_required
 @require_POST
-def paper_add_arxiv_view(request, profile_id):
-    """Add papers from arXiv by ID – downloads the PDF into the profile dir."""
-    MAX_IDS_PER_REQUEST = 10  # cap to avoid blocking worker with time.sleep(3) delays
+def paper_add_by_id_view(request, profile_id):
+    """Add papers from a preprint source by ID – downloads each PDF.
+
+    The source comes from the ``source`` POST field; with a single source
+    enabled the UI omits it and the first add-capable source is used.
+    """
+    MAX_IDS_PER_REQUEST = 10  # cap to avoid blocking a worker on rate-limit sleeps
     pb_user = request.pb_user
     profile = get_object_or_404(Profile, pk=profile_id, user=pb_user)
 
-    raw = request.POST.get("arxiv_ids", "")
-    arxiv_ids = _parse_arxiv_ids(raw)
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    source = resolve_source(request.POST.get("source", ""), "supports_add_by_id")
+    if source is None:
+        return _add_by_id_error(request, is_ajax, "No source available to add papers by ID.")
 
-    if not arxiv_ids:
-        if is_ajax:
-            return JsonResponse({"ok": False, "error": "No valid arXiv IDs provided."}, status=400)
-        messages.error(request, "No valid arXiv IDs provided.")
-        return redirect(_safe_next(request, "profile_list"))
+    raw = request.POST.get("source_ids", "")
+    source_ids = _parse_source_ids(source, raw)
+    if not source_ids:
+        return _add_by_id_error(request, is_ajax, f"No valid {source.label} IDs provided.")
 
-    if not is_ajax and len(arxiv_ids) > MAX_IDS_PER_REQUEST:
+    if not is_ajax and len(source_ids) > MAX_IDS_PER_REQUEST:
         messages.warning(
             request,
-            f"Too many IDs ({len(arxiv_ids)}). Only the first {MAX_IDS_PER_REQUEST} will be processed.",
+            f"Too many IDs ({len(source_ids)}). Only the first {MAX_IDS_PER_REQUEST} will be processed.",
         )
-        arxiv_ids = arxiv_ids[:MAX_IDS_PER_REQUEST]
+        source_ids = source_ids[:MAX_IDS_PER_REQUEST]
 
     if is_ajax:
         # AJAX: process a single ID and return the paper info
-        aid = arxiv_ids[0]
-        success, failed = _download_arxiv_pdfs(pb_user, profile, [aid])
-        if failed:
-            return JsonResponse({"ok": False, "error": f"Failed to download {aid}."}, status=400)
-        # Look up the paper to return its info for the DOM
-        paper = Paper.objects.filter(arxiv_id=aid).order_by("-id").first()
-        if not paper:
-            # Legacy data may have version suffix (e.g., 2507.08778v1);
-            # prefer the newest matching row deterministically.
-            paper = Paper.objects.filter(arxiv_id__startswith=aid + 'v').order_by("-id").first()
-        if not paper:
-            return JsonResponse({"ok": False, "error": f"Paper stored but could not be retrieved for arXiv ID {aid}."}, status=500)
-        return JsonResponse({
-            "ok": True,
-            "paper": {
-                "id": paper.pk,
-                "title": paper.title,
-                "arxiv_id": paper.arxiv_id,
-                "source": paper.source,
-            },
-        })
+        sid = source_ids[0]
+        papers, failed = _download_source_papers(pb_user, profile, source, [sid])
+        if failed or not papers:
+            return JsonResponse({"ok": False, "error": f"Failed to download {sid}."}, status=400)
+        # The helper hands back the row it linked, which after SHA-256 dedup
+        # may be an existing paper under a different source or id.
+        return JsonResponse({"ok": True, "paper": _paper_json(papers[0])})
 
-    success, failed = _download_arxiv_pdfs(pb_user, profile, arxiv_ids)
-    if success:
-        messages.success(request, f"Added {success} paper(s) from arXiv.")
+    papers, failed = _download_source_papers(pb_user, profile, source, source_ids)
+    if papers:
+        messages.success(request, f"Added {len(papers)} paper(s) from {source.label}.")
     for fid in failed:
         messages.warning(request, f"Failed to download {fid}.")
 
     return redirect(_safe_next(request, "profile_list"))
 
 
-def _parse_arxiv_ids(raw: str) -> list[str]:
-    """Extract valid arXiv IDs from free-form input."""
+def _add_by_id_error(request, is_ajax, message):
+    """Report an add-by-ID failure the way the caller expects."""
+    if is_ajax:
+        return JsonResponse({"ok": False, "error": message}, status=400)
+    messages.error(request, message)
+    return redirect(_safe_next(request, "profile_list"))
+
+
+def _paper_json(paper):
+    """Paper fields the add-paper JS needs to render a row."""
+    return {
+        "id": paper.pk,
+        "title": paper.title,
+        "source_id": paper.source_id,
+        "source": paper.source,
+        "source_label": paper.source_label,
+        "landing_url": paper.landing_url,
+    }
+
+
+def _parse_source_ids(source, raw: str) -> list[str]:
+    """Extract valid IDs for *source* from free-form input.
+
+    Each token is handed to the source's own parser, so URL, prefixed and
+    bare-ID forms are the source's business rather than the view's.
+    """
     ids = []
-    for line in raw.replace(",", "\n").splitlines():
-        token = line.strip()
-        if not token:
-            continue
-        # Strip URL prefixes
-        token = re.sub(r"https?://arxiv\.org/(abs|pdf)/", "", token)
-        if token.lower().startswith("arxiv:"):
-            token = token[6:]
-        # Strip query/fragment suffixes, then .pdf, then trailing version
-        token = re.sub(r"[?#].*$", "", token)
-        token = re.sub(r"\.pdf$", "", token, flags=re.IGNORECASE)
-        token = re.sub(r"v\d+$", "", token)
-        if ARXIV_ID_RE.match(token) and token not in ids:
-            ids.append(token)
+    for token in SOURCE_ID_SEPARATOR_RE.split(raw or ""):
+        source_id = source.normalize_id(token)
+        if source_id and source_id not in ids:
+            ids.append(source_id)
     return ids
 
 
-def _fetch_arxiv_metadata(arxiv_ids):
-    """Batch-fetch metadata (title, abstract, date) from arXiv API.
-
-    Returns a dict keyed by arxiv_id (version-stripped).
-    Falls back gracefully if the arxiv package is unavailable.
-    """
-    metadata = {}
-    try:
-        import arxiv as arxiv_lib
-
-        client = arxiv_lib.Client()
-        search = arxiv_lib.Search(id_list=arxiv_ids)
-        for paper in client.results(search):
-            aid = paper.get_short_id().split("v")[0]  # strip version
-            metadata[aid] = {
-                "title": paper.title,
-                "abstract": paper.summary,
-                "submitted_date": paper.published,
-                "authors": [a.name for a in paper.authors],
-                "categories": [c for c in paper.categories],
-            }
-    except ImportError:
-        pass  # arxiv package not installed; titles will be arXiv IDs
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception("Failed to fetch arXiv metadata")
-    return metadata
+def _published_datetime(raw):
+    """Parse a source's ISO published timestamp, or None."""
+    return parse_datetime(raw) if raw else None
 
 
-def _download_arxiv_pdfs(pb_user, profile, arxiv_ids):
-    """Download PDFs for a list of arXiv IDs, deduplicating by SHA-256.
+def _published_date_str(raw) -> str:
+    """YYYY-MM-DD from a source's ISO published timestamp."""
+    dt = _published_datetime(raw)
+    return dt.date().isoformat() if dt else (raw or "")[:10]
+
+
+def _format_author_list(names, cap: int = 25) -> str:
+    """Join author names, capping at *cap* names with 'et al.'."""
+    names = list(names or [])
+    if len(names) > cap:
+        return ", ".join(names[:cap]) + " et al."
+    return ", ".join(names)
+
+
+def _download_source_papers(pb_user, profile, source, source_ids):
+    """Download PDFs for a list of source IDs, deduplicating by SHA-256.
 
     Creates Paper rows and links them to the profile's corpus.
-    Returns (success_count, failed_ids).
+    Returns (papers, failed_ids).
     """
     import logging
     import requests as http_requests
@@ -1156,32 +1254,44 @@ def _download_arxiv_pdfs(pb_user, profile, arxiv_ids):
     MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MB
     logger = logging.getLogger(__name__)
     corpus = _get_or_create_user_corpus(pb_user, profile)
+    delay = source.request_delay_seconds
 
-    # Batch-fetch metadata (title, abstract, date) from arXiv API
-    arxiv_meta = _fetch_arxiv_metadata(arxiv_ids)
+    # One batched metadata call up front, so the loop below only fetches PDFs
+    try:
+        entries = run_sync(source.fetch_many(source_ids))
+    except Exception:
+        logger.exception("Failed to fetch %s metadata", source.name)
+        entries = {}
 
-    success = 0
+    papers = []
     failed = []
-    for i, aid in enumerate(arxiv_ids):
-        # Respect arXiv rate limits: no more than one request every 3 seconds
-        if i > 0:
-            time.sleep(3)
+    for i, sid in enumerate(source_ids):
+        # Respect the source's published rate limit between requests
+        if i > 0 and delay:
+            time.sleep(delay)
+        entry = entries.get(sid)
+        if entry is None or not entry.pdf_url:
+            logger.warning("%s has no PDF for %s", source.name, sid)
+            failed.append(sid)
+            continue
         try:
-            resp = http_requests.get(f"https://arxiv.org/pdf/{aid}.pdf", timeout=30)
+            resp = http_requests.get(entry.pdf_url, timeout=30)
             resp.raise_for_status()
             # Reject early if Content-Length header exceeds limit
             content_length = resp.headers.get("Content-Length")
             if content_length and int(content_length) > MAX_PDF_BYTES:
-                logger.warning("arXiv PDF for %s too large per Content-Length (%s bytes)", aid, content_length)
-                failed.append(aid)
+                logger.warning(
+                    "PDF for %s too large per Content-Length (%s bytes)", sid, content_length
+                )
+                failed.append(sid)
                 continue
             if "application/pdf" not in resp.headers.get("Content-Type", ""):
-                logger.warning("arXiv returned non-PDF content for %s", aid)
-                failed.append(aid)
+                logger.warning("%s returned non-PDF content for %s", source.name, sid)
+                failed.append(sid)
                 continue
             if len(resp.content) > MAX_PDF_BYTES:
-                logger.warning("arXiv PDF for %s exceeds size limit (%d bytes)", aid, len(resp.content))
-                failed.append(aid)
+                logger.warning("PDF for %s exceeds size limit (%d bytes)", sid, len(resp.content))
+                failed.append(sid)
                 continue
 
             # Compute hash and check for existing paper
@@ -1190,127 +1300,122 @@ def _download_arxiv_pdfs(pb_user, profile, arxiv_ids):
             if existing:
                 # Paper already in DB — just link to this corpus
                 _link_paper_to_corpus(existing, corpus)
-                success += 1
+                papers.append(existing)
                 continue
 
             # New paper — store file and create DB row
             dest = _store_paper_bytes(file_hash, resp.content)
-            meta = arxiv_meta.get(aid, {})
             from django.db import IntegrityError
+
             try:
                 paper = Paper.objects.create(
-                    arxiv_id=aid,
+                    source_id=entry.source_id,
                     sha256=file_hash,
-                    title=meta.get("title", aid),
-                    abstract=meta.get("abstract"),
-                    submitted_date=meta.get("submitted_date"),
-                    metadata={"categories": meta.get("categories", []),
-                              "authors": meta.get("authors", [])},
+                    title=entry.title or sid,
+                    abstract=entry.abstract or None,
+                    submitted_date=_published_datetime(entry.published),
+                    metadata={"categories": entry.categories, "authors": entry.authors},
                     pdf_path=str(dest),
-                    source="arxiv",
+                    source=source.name,
                 )
             except IntegrityError:
                 # Race condition: another request created it first
                 paper = Paper.objects.get(sha256=file_hash)
             _link_paper_to_corpus(paper, corpus)
-            success += 1
+            papers.append(paper)
         except Exception:
-            logger.exception("Failed to download arXiv PDF %s", aid)
-            failed.append(aid)
-    return success, failed
+            logger.exception("Failed to download %s PDF %s", source.name, sid)
+            failed.append(sid)
+    return papers, failed
 
 
 @pbuser_required
-def paper_search_arxiv_api_view(request, profile_id):
-    """JSON API: search arXiv by title/author for inline results."""
+def paper_search_api_view(request, profile_id):
+    """JSON API: search a preprint source by title/author for inline results."""
     pb_user = request.pb_user
     profile = get_object_or_404(Profile, pk=profile_id, user=pb_user)
 
-    # Rate limit: one search per 3 seconds per session
-    SEARCH_COOLDOWN = 3  # seconds
+    source = resolve_source(request.GET.get("source", ""), "supports_search")
+    if source is None:
+        return JsonResponse({"error": "No source available to search."}, status=400)
+
+    # Rate limit: honour the source's own request spacing, per session
+    cooldown = source.request_delay_seconds
+    session_key = f"search_ts_{source.name}"
     now = time.time()
-    last_search = request.session.get("arxiv_search_ts", 0)
-    if now - last_search < SEARCH_COOLDOWN:
-        wait = int(SEARCH_COOLDOWN - (now - last_search)) + 1
+    last_search = request.session.get(session_key, 0)
+    if cooldown and now - last_search < cooldown:
+        wait = int(cooldown - (now - last_search)) + 1
         return JsonResponse(
             {"error": f"Please wait {wait}s before searching again."},
             status=429,
         )
-    request.session["arxiv_search_ts"] = now
+    request.session[session_key] = now
 
-    title_q = request.GET.get("title", "").strip().replace('"', "")
-    author_q = request.GET.get("author", "").strip().replace('"', "")
+    title_q = request.GET.get("title", "").strip()
+    author_q = request.GET.get("author", "").strip()
 
     if not title_q and not author_q:
         return JsonResponse({"error": "Enter a title or author."}, status=400)
 
     try:
-        import arxiv as arxiv_lib
-
-        parts = []
-        if title_q:
-            parts.append(f'ti:"{title_q}"')
-        if author_q:
-            parts.append(f'au:"{author_q}"')
-        query_string = " AND ".join(parts)
-
-        client = arxiv_lib.Client()
-        search = arxiv_lib.Search(
-            query=query_string,
-            max_results=django_settings.ARXIV_SEARCH_MAX_RESULTS,
-            sort_by=arxiv_lib.SortCriterion.SubmittedDate,
-            sort_order=arxiv_lib.SortOrder.Descending,
-        )
-
-        # Existing paper arxiv_ids for this profile (to flag already-added ones)
-        corpus = _get_or_create_user_corpus(pb_user, profile)
-        existing_ids = set(
-            Paper.objects.filter(corpora=corpus, arxiv_id__isnull=False)
-            .values_list("arxiv_id", flat=True)
-        )
-
-        results = []
-        for paper in client.results(search):
-            aid = paper.get_short_id().split("v")[0]  # strip version
-            # Truncate author list after 25 names
-            author_names = [a.name for a in paper.authors]
-            if len(author_names) > 25:
-                authors_str = ", ".join(author_names[:25]) + " et al."
-            else:
-                authors_str = ", ".join(author_names)
-            results.append({
-                "arxiv_id": aid,
-                "title": paper.title,
-                "authors": authors_str,
-                "published": paper.published.strftime("%Y-%m-%d"),
-                "already_added": aid in existing_ids,
-            })
-
-        return JsonResponse({"results": results})
-
-    except ImportError:
-        return JsonResponse(
-            {"error": "The 'arxiv' package is not installed. Run: pip install arxiv"},
-            status=500,
+        entries = run_sync(
+            source.search(
+                title=title_q,
+                author=author_q,
+                max_results=django_settings.SOURCE_SEARCH_MAX_RESULTS,
+            )
         )
     except Exception as exc:
         import logging
+
         logger = logging.getLogger(__name__)
-        logger.exception("arXiv search failed")
-        # Detect upstream rate limiting from arXiv
+        logger.exception("%s search failed", source.name)
+        # Detect upstream rate limiting from the source
         is_rate_limited = (
-            hasattr(exc, 'response') and getattr(exc.response, 'status_code', None) == 429
-        ) or '429' in str(exc)
+            hasattr(exc, "response") and getattr(exc.response, "status_code", None) == 429
+        ) or "429" in str(exc)
         if is_rate_limited:
             return JsonResponse(
-                {"error": "arXiv is rate-limiting requests. Please wait a minute and try again."},
+                {
+                    "error": f"{source.label} is rate-limiting requests. Please wait a minute and try again."
+                },
                 status=429,
             )
         detail = str(exc) if django_settings.DEBUG else "Search failed. Please try again."
         return JsonResponse({"error": detail}, status=500)
 
+    # Existing paper source_ids for this profile (to flag already-added ones)
+    corpus = _get_or_create_user_corpus(pb_user, profile)
+    existing_ids = set(
+        Paper.objects.filter(
+            corpora=corpus, source=source.name, source_id__isnull=False
+        ).values_list("source_id", flat=True)
+    )
+
+    results = [
+        {
+            "source_id": entry.source_id,
+            "title": entry.title,
+            "authors": _format_author_list(entry.authors),
+            "published": _published_date_str(entry.published),
+            "landing_url": source.landing_url(entry.source_id),
+            "already_added": entry.source_id in existing_ids,
+        }
+        for entry in entries
+    ]
+
+    return JsonResponse(
+        {
+            "source": source.name,
+            "label": source.label,
+            "results": results,
+        }
+    )
+
 
 # ── Recommendations ────────────────────────────────────────────────────────
+
 
 @pbuser_required
 def recommendations_view(request):
@@ -1318,12 +1423,15 @@ def recommendations_view(request):
     profiles = Profile.objects.filter(user=pb_user).order_by("name")
 
     if not profiles.exists():
-        return render(request, "recommendations/list.html", {
-            "pb_user": pb_user,
-            "profiles": [],
-            "recs_json": "[]",
-            "categories_json": "[]",
-        })
+        return render(
+            request,
+            "recommendations/list.html",
+            {
+                "pb_user": pb_user,
+                "profiles": [],
+                "recs_json": "[]",
+            },
+        )
 
     # Selected profile (from GET param); default to all profiles
     selected_id = request.GET.get("profile", "")
@@ -1342,29 +1450,43 @@ def recommendations_view(request):
         r["date_iso"] = r["date_obj"].isoformat() if r.get("date_obj") else None
         del r["date_obj"]
 
-    # Categories for filter checkboxes
-    if selected_profile:
-        profile_categories = sorted(selected_profile.categories or [])
-    else:
-        cats = set()
-        for p in profiles:
-            cats.update(p.categories or [])
-        profile_categories = sorted(cats)
+    # Categories for the filter pills, grouped by source.
+    scoped = [selected_profile] if selected_profile else list(profiles)
+    codes_by_source = {}
+    for p in scoped:
+        for source_name, codes in p.categories_by_source.items():
+            codes_by_source.setdefault(source_name, set()).update(codes)
+
+    filter_sources = [
+        {
+            "name": name,
+            "label": source_label(name),
+            "categories": [
+                {"code": code, "label": category_label(name, code)}
+                for code in sorted(codes_by_source[name])
+            ],
+        }
+        for name in order_source_names(codes_by_source)
+        if codes_by_source[name]
+    ]
 
     profile_param = selected_profile.pk if selected_profile else "all"
 
-    return render(request, "recommendations/list.html", {
-        "pb_user": pb_user,
-        "profiles": profiles,
-        "selected_profile": selected_profile,
-        "profile_param": profile_param,
-        "recs_json": json.dumps(recs),
-        "categories_json": json.dumps(profile_categories),
-        "code_to_label_json": json.dumps(ARXIV_CODE_TO_LABEL),
-        "profiles_json": json.dumps([
-            {"id": p.pk, "name": p.name} for p in profiles
-        ]),
-    })
+    return render(
+        request,
+        "recommendations/list.html",
+        {
+            "pb_user": pb_user,
+            "profiles": profiles,
+            "selected_profile": selected_profile,
+            "profile_param": profile_param,
+            "recs_json": json.dumps(recs),
+            "filter_sources_json": json.dumps(filter_sources),
+            "show_source_labels": multiple_sources_enabled(),
+            "code_to_label_json": json.dumps(code_to_label_by_source()),
+            "profiles_json": json.dumps([{"id": p.pk, "name": p.name} for p in profiles]),
+        },
+    )
 
 
 def _query_profile_recommendations(pb_user, profile=None):
@@ -1382,9 +1504,9 @@ def _query_profile_recommendations(pb_user, profile=None):
             return []
     else:
         # All profiles: collect every user corpus
-        user_corpora = list(Corpus.objects.filter(
-            user=pb_user, name__startswith=f"user_{pb_user.pk}_profile_"
-        ))
+        user_corpora = list(
+            Corpus.objects.filter(user=pb_user, name__startswith=f"user_{pb_user.pk}_profile_")
+        )
         if not user_corpora:
             return []
 
@@ -1396,15 +1518,14 @@ def _query_profile_recommendations(pb_user, profile=None):
     profile_prefix = f"user_{pb_user.pk}_profile_"
     for c in user_corpora:
         if c.name.startswith(profile_prefix):
-            profile_id_str = c.name[len(profile_prefix):]
+            profile_id_str = c.name[len(profile_prefix) :]
             if profile_id_str.isdigit():
                 corpus_to_profile[c.pk] = int(profile_id_str)
 
     recs_list = list(
         Recommendation.objects.filter(run__in=runs)
         .select_related("paper", "run")
-        .order_by("-paper__submitted_date", "-score", "paper__arxiv_id")
-        [:5000]
+        .order_by("-paper__submitted_date", "-score", "paper__source_id")[:5000]
     )
 
     # Prefetch summaries for all papers in one query
@@ -1424,29 +1545,31 @@ def _query_profile_recommendations(pb_user, profile=None):
         if pid:
             profile_paper_ids.setdefault(pid, set()).add(paper_pk)
 
-    # Deduplicate by arxiv_id keeping highest score
+    # Deduplicate keeping the highest score. Keyed on (source, source_id).
     seen = {}
     for rec in recs_list:
         paper = rec.paper
-        aid = paper.arxiv_id or f"_pk_{paper.pk}"
-        if aid in seen and rec.score <= seen[aid]["score"]:
+        key = (paper.source, paper.source_id) if paper.source_id else f"_pk_{paper.pk}"
+        if key in seen and rec.score <= seen[key]["score"]:
             continue
 
         dt = paper.submitted_date
         date_obj = dt.date() if dt else None
         date_str = dt.strftime("%d %B %Y") if dt else "Unknown Date"
 
-        seen[aid] = {
+        seen[key] = {
             "paper_id": paper.pk,
             "profile_id": corpus_to_profile.get(rec.run.user_corpus_id),
             "in_corpus": [
-                prof_id for prof_id, paper_set in profile_paper_ids.items()
-                if paper.pk in paper_set
+                prof_id for prof_id, paper_set in profile_paper_ids.items() if paper.pk in paper_set
             ],
             "title": paper.title,
             "score": rec.score,
             "rank": rec.rank,
-            "arxiv_id": paper.arxiv_id,
+            "source_id": paper.source_id,
+            "source": paper.source,
+            "source_label": paper.source_label,
+            "landing_url": paper.landing_url,
             "abstract": paper.abstract or "",
             "summary_text": summaries_map.get(paper.pk, ""),
             "date_obj": date_obj,
@@ -1464,7 +1587,7 @@ def _query_profile_recommendations(pb_user, profile=None):
 def recommendation_add_to_profile_view(request, profile_id, paper_id):
     """Add a recommended paper to a profile's corpus (AJAX).
 
-    Unlike paper_add_arxiv_view, this doesn't download anything — the paper
+    Unlike paper_add_by_id_view, this doesn't download anything — the paper
     already exists in the DB from the pipeline.
     """
     pb_user = request.pb_user
@@ -1472,9 +1595,7 @@ def recommendation_add_to_profile_view(request, profile_id, paper_id):
     paper = get_object_or_404(Paper, pk=paper_id)
 
     # Verify the paper was actually recommended to this user
-    was_recommended = Recommendation.objects.filter(
-        paper=paper, run__user=pb_user
-    ).exists()
+    was_recommended = Recommendation.objects.filter(paper=paper, run__user=pb_user).exists()
     if not was_recommended:
         return JsonResponse({"ok": False, "error": "Paper not found."}, status=404)
 
@@ -1485,18 +1606,17 @@ def recommendation_add_to_profile_view(request, profile_id, paper_id):
         return JsonResponse({"ok": True, "already_linked": True})
 
     _link_paper_to_corpus(paper, corpus)
-    return JsonResponse({
-        "ok": True,
-        "already_linked": False,
-        "paper": {
-            "id": paper.pk,
-            "title": paper.title,
-            "arxiv_id": paper.arxiv_id,
-        },
-    })
+    return JsonResponse(
+        {
+            "ok": True,
+            "already_linked": False,
+            "paper": _paper_json(paper),
+        }
+    )
 
 
 # ── Settings ───────────────────────────────────────────────────────────────
+
 
 @pbuser_required
 def settings_view(request):
@@ -1523,12 +1643,16 @@ def settings_view(request):
     # Are ALL profiles paused?
     all_paused = profiles.exists() and not profiles.filter(email_notify=True).exists()
 
-    return render(request, "settings.html", {
-        "pb_user": pb_user,
-        "form": form,
-        "profiles": profiles,
-        "all_paused": all_paused,
-    })
+    return render(
+        request,
+        "settings.html",
+        {
+            "pb_user": pb_user,
+            "form": form,
+            "profiles": profiles,
+            "all_paused": all_paused,
+        },
+    )
 
 
 @pbuser_required
@@ -1604,11 +1728,13 @@ def delete_account_view(request):
 
 # ── Help page ──────────────────────────────────────────────────────────────
 
+
 def help_view(request):
     return render(request, "help.html")
 
 
 # ── Monitoring dashboard (staff only) ──────────────────────────────────────
+
 
 @staff_member_required
 def monitoring_dashboard_view(request):
@@ -1653,12 +1779,14 @@ def monitoring_dashboard_view(request):
         for i in range(days):
             d = start + timedelta(days=i)
             n = counts.get(d, 0)
-            series.append({
-                "day": d,
-                "n": n,
-                "pct": max(1, round(n / peak * 100)) if n else 0,
-                "show_label": d.weekday() == 0,  # Mondays (once per week)
-            })
+            series.append(
+                {
+                    "day": d,
+                    "n": n,
+                    "pct": max(1, round(n / peak * 100)) if n else 0,
+                    "show_label": d.weekday() == 0,  # Mondays (once per week)
+                }
+            )
         return series
 
     # ── Pipeline health ──
@@ -1693,12 +1821,9 @@ def monitoring_dashboard_view(request):
     # ── Ingestion (real; ArxivDailyStats is empty, so derive from Paper) ──
     total_papers = Paper.objects.count()
     papers_by_source = {
-        row["source"]: row["n"]
-        for row in Paper.objects.values("source").annotate(n=Count("id"))
+        row["source"]: row["n"] for row in Paper.objects.values("source").annotate(n=Count("id"))
     }
-    papers_with_abstract_emb = (
-        Paper.objects.filter(embeddings__type="abstract").distinct().count()
-    )
+    papers_with_abstract_emb = Paper.objects.filter(embeddings__type="abstract").distinct().count()
     papers_missing_embeddings = total_papers - papers_with_abstract_emb
     papers_per_day = _daily_series(Paper.objects.all(), window_days)
     papers_window_total = sum(r["n"] for r in papers_per_day)
@@ -1706,9 +1831,9 @@ def monitoring_dashboard_view(request):
     # ── Recommendations (real) ──
     runs_in_window = RecommendationRun.objects.filter(created_at__gte=since).count()
     recs_in_window = Recommendation.objects.filter(created_at__gte=since).count()
-    avg_fetched = RecommendationRun.objects.filter(
-        created_at__gte=since
-    ).aggregate(a=Avg("total_papers_fetched"))["a"]
+    avg_fetched = RecommendationRun.objects.filter(created_at__gte=since).aggregate(
+        a=Avg("total_papers_fetched")
+    )["a"]
     recs_sent_per_day = _daily_series(
         Recommendation.objects.filter(sent_in_email=True), window_days
     )
@@ -1718,9 +1843,7 @@ def monitoring_dashboard_view(request):
     user_total = PBUser.objects.count()
     user_active = PBUser.objects.filter(is_active=True).count()
     user_verified = PBUser.objects.filter(email_verified=True).count()
-    user_with_orcid = (
-        PBUser.objects.exclude(orcid_id__isnull=True).exclude(orcid_id="").count()
-    )
+    user_with_orcid = PBUser.objects.exclude(orcid_id__isnull=True).exclude(orcid_id="").count()
     signups_per_day = _daily_series(PBUser.objects.all(), window_days)
     signups_window_total = sum(r["n"] for r in signups_per_day)
     profiles_total = Profile.objects.count()
